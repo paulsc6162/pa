@@ -2151,6 +2151,51 @@ const bio = {
 /* --------------------------------------------------------- unlock UI */
 let afterUnlock = null;
 
+/* The passphrase should be a once-ever thing. Offer to tie it to Face ID
+   the first time it is used successfully, while we still have it in hand. */
+function offerBio(passphrase){
+  if (bio.enrolled() || !bio.available()) return;
+  if (localStorage.getItem('pa.bio.asked')) return;
+  localStorage.setItem('pa.bio.asked', '1');
+
+  setTimeout(() => {
+    openSheet(
+      '<h2>Face ID?</h2>' +
+      '<p>Tie the vault to Face ID and that is the last time you type the ' +
+      'passphrase on this device, sir. It still works if you ever need it.</p>' +
+      '<p class="small muted">The passphrase is wrapped by a secret only Face ID ' +
+      'can produce. It is never stored anywhere readable and never leaves the phone.</p>' +
+      '<div style="height:1rem"></div>' +
+      '<button class="btn" id="b-yes">Set up Face ID</button>' +
+      '<div style="height:.6rem"></div>' +
+      '<button class="btn ghost" onclick="closeSheet()">Not now</button>');
+
+    $('#b-yes').onclick = async () => {
+      const b = $('#b-yes');
+      b.disabled = true; b.textContent = 'Looking…';
+      try {
+        await bio.enrol(passphrase);
+        closeSheet();
+        toast('Done, sir. A glance from now on.');
+      } catch (prfErr){
+        b.disabled = false; b.textContent = 'Set up Face ID';
+        const weaker = confirm(
+          'This iOS cannot tie a key to Face ID properly.\n\n' +
+          'There is a lesser version: the passphrase is kept in this browser\'s ' +
+          'storage and Face ID guards the button rather than the maths. Anyone ' +
+          'who can read this phone\'s storage could recover it.\n\n' +
+          'Use the lesser version?');
+        if (!weaker) return toast('Passphrase it stays, sir.');
+        try {
+          await bio.enrolWeak(passphrase);
+          closeSheet();
+          toast('Done, sir — the lesser version. Keep the phone locked.');
+        } catch { toast('Face ID would not play along, sir.'); }
+      }
+    };
+  }, 700);
+}
+
 function sheetUnlock(then){
   afterUnlock = then || null;
   openSheet(
@@ -2188,6 +2233,7 @@ function sheetUnlock(then){
 async function openWith(passphrase){
   const isNew = await openVault(passphrase);
   closeSheet();
+  offerBio(passphrase);          // ask once, at the moment it makes sense
   await loadAll();
   await mem.load();
   await prefs.pull();
