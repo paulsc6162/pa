@@ -8,6 +8,8 @@
 <meta name="theme-color" content="#12161f">
 <title>PA</title>
 <link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <style>
 :root{
   --ground:#12161f;
@@ -150,6 +152,35 @@ section[hidden]{display:none}
   padding:.6rem 1rem;border-radius:10px;font-size:.9rem;z-index:30;display:none;max-width:88vw
 }
 #toast.show{display:block}
+
+#face{position:fixed;inset:0;z-index:25;background:#0b0e14}
+#face[hidden]{display:none}
+#face-cv{position:absolute;inset:0;width:100%;height:100%;display:block}
+#face-cap{
+  position:absolute;left:1.2rem;right:1.2rem;
+  bottom:calc(4.4rem + env(safe-area-inset-bottom));
+  color:var(--paper);font-size:1rem;line-height:1.45;text-align:center;
+  text-shadow:0 2px 14px rgba(0,0,0,.95);max-height:26vh;overflow:auto
+}
+#face-x{
+  position:absolute;left:50%;transform:translateX(-50%);
+  bottom:calc(1.2rem + env(safe-area-inset-bottom));
+  border:1px solid var(--line);color:var(--muted);
+  padding:.55rem 1.4rem;border-radius:10px;font-size:.85rem;
+  background:rgba(11,14,20,.7)
+}
+
+#wake-dot{
+  position:fixed;top:calc(.5rem + env(safe-area-inset-top));right:.9rem;z-index:15;
+  font-size:.7rem;color:var(--brass);background:rgba(18,22,31,.85);
+  padding:.25rem .5rem;border-radius:6px;border:1px solid var(--line);
+  pointer-events:none
+}
+#wake-bar{
+  position:fixed;left:.9rem;right:.9rem;bottom:calc(66px + env(safe-area-inset-bottom));
+  z-index:16;background:var(--raised);border:1px solid var(--brass);color:var(--brass);
+  padding:.7rem;border-radius:10px;font-size:.9rem
+}
 </style>
 </head>
 <body>
@@ -169,15 +200,6 @@ section[hidden]{display:none}
     <button class="btn" id="g-signin">Sign in</button>
   </div>
 
-  <div id="step-unlock" hidden>
-    <label for="g-pass">Vault passphrase</label>
-    <input id="g-pass" type="password" autocomplete="off">
-    <p class="small muted" id="g-hint">This never leaves the phone. Not even I can recover it for you.</p>
-    <div style="height:.6rem"></div>
-    <button class="btn" id="g-unlock">Unlock</button>
-    <div style="height:.6rem"></div>
-    <button class="btn ghost" id="g-out">Sign out</button>
-  </div>
 </div>
 
 <!-- =============================================================== app -->
@@ -211,7 +233,7 @@ section[hidden]{display:none}
   </section>
 
   <section id="view-ask" hidden>
-    <div class="head"><h2>Ask</h2><span style="display:flex;gap:.5rem;flex:0 0 auto"><button class="chip" id="a-mem">Memory</button><button class="chip" id="a-voice">Voice</button></span></div>
+    <div class="head"><h2>Ask</h2><span style="display:flex;gap:.5rem;flex:0 0 auto"><button class="chip" id="a-face">Face</button><button class="chip" id="a-mem">Memory</button><button class="chip" id="a-voice">Voice</button></span></div>
     <div id="a-thread"></div>
     <div style="height:4rem"></div>
   </section>
@@ -238,7 +260,14 @@ section[hidden]{display:none}
 </div>
 
 <div id="sheet"><div class="scrim"></div><div class="panel"><div class="grab"></div><div id="sheet-body"></div></div></div>
+<div id="face" hidden>
+  <canvas id="face-cv"></canvas>
+  <div id="face-cap"></div>
+  <button id="face-x" aria-label="Close">Close</button>
+</div>
 <div id="toast"></div>
+<div id="wake-dot" hidden></div>
+<button id="wake-bar" hidden>Tap to start listening again</button>
 
 <script>
 /* =====================================================================
@@ -503,12 +532,16 @@ const voice = {
     const v = this.list.find(x => x.name === this.chosen);
     if (v) u.voice = v;
     u.rate = 0.96; u.pitch = 0.92;      // a shade slower and lower: more measured
+    u.onstart = () => face.startTalk(text);
+    u.onend = u.onerror = () => face.stopTalk();
     speechSynthesis.speak(u);
   },
 
   async speak(text){
     const line = String(text || '').replace(/\s+/g, ' ').trim();
     if (!line) return;
+    const cap = $('#face-cap');
+    if (cap) cap.textContent = line;
     if (!this.remote) return this.local(line);
     try {
       const r = await fetch(CFG.speakEndpoint, {
@@ -519,8 +552,10 @@ const voice = {
       if (!r.ok) throw new Error('tts');
       const url = URL.createObjectURL(await r.blob());
       speechSynthesis.cancel();
+      face.attach(audio);
       audio.src = url;
-      audio.onended = () => URL.revokeObjectURL(url);
+      audio.onplay  = () => face.startTalk(line);
+      audio.onended = () => { face.stopTalk(); URL.revokeObjectURL(url); };
       await audio.play();
     } catch {
       this.local(line);                 // network down, no key, quota gone
@@ -554,6 +589,8 @@ function listen(onText){
   rec.onerror = () => { prosody.stop(0); toast('I did not catch that, sir.'); };
 
   btn.classList.add('on');
+  wake.pause();
+  rec.addEventListener('end', () => wake.resume());
   // If the mic is busy or refused, dictation still works — just without the reading.
   prosody.start().finally(() => { try { rec && rec.start(); } catch {} });
 }
@@ -704,6 +741,12 @@ function renderBrief(){
     flag.textContent = S.nextHol.title + ' ' + relative(daysUntil(S.nextHol.date)) + '.';
   } else flag.hidden = true;
 
+  if (locked()){
+    $('#b-today').innerHTML = lockNotice('Your day');
+    $('#b-ahead').innerHTML = '';
+    return;
+  }
+
   const all = upcoming(5);
   const today = all.filter(o => o.days === 0);
   const ahead = all.filter(o => o.days > 0);
@@ -717,6 +760,7 @@ function renderBrief(){
 }
 
 function renderVault(){
+  if (locked()) return $('#v-list').innerHTML = lockNotice('Your documents');
   if (!S.docs.length){
     $('#v-list').innerHTML =
       '<div class="empty">The vault is empty, sir. A passport or a licence would be a sensible start.</div>';
@@ -740,6 +784,7 @@ function renderVault(){
 }
 
 function renderCal(){
+  if (locked()) return $('#c-list').innerHTML = lockNotice('The diary');
   const live = S.events.filter(e => !e.done);
   $('#c-list').innerHTML = live.length
     ? live.map(e => '<button class="item" data-evt="' + e.id + '"><span class="t"><b>' +
@@ -751,6 +796,7 @@ function renderCal(){
 }
 
 function renderPeople(){
+  if (locked()) return $('#p-list').innerHTML = lockNotice('Contacts and subscriptions');
   const c = S.contacts.map(p =>
     '<button class="item" data-con="' + p.id + '"><span class="t"><b>' + esc(p._.name) +
     '</b><span class="small muted">' + esc(p._.relationship || p._.phone || '') +
@@ -1387,9 +1433,14 @@ async function askModel(q){
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         question: q,
-        context: buildContext(),
+        context: locked() ? {today: new Date().toLocaleDateString('en-GB',
+                    {weekday:'long', day:'numeric', month:'long', year:'numeric'}),
+                  weather_today: weatherLine(0),
+                  bank_holiday: S.holiday ? S.holiday.title : null,
+                  vault_locked: true}
+                : buildContext(),
         history: chat.slice(-12, -1),
-        memory: mem.forModel(),
+        memory: locked() ? [] : mem.forModel(),
         voice_reading: lastReading
       })
     });
@@ -1398,8 +1449,11 @@ async function askModel(q){
     const j = await r.json();
     thinking(false);
     if (!j.answer) throw new Error('empty');
-    say(esc(j.answer), j.answer);
-    mem.record(q, j.answer);        // deliberately not awaited
+    let answer = j.answer;
+    const mood = answer.match(/\[mood:\s*([a-z]+)\s*\]\s*$/i);
+    if (mood){ face.setMood(mood[1].toLowerCase()); answer = answer.slice(0, mood.index).trim(); }
+    say(esc(answer), answer);
+    if (!locked()) mem.record(q, answer);   // deliberately not awaited
     return;
   } catch {
     thinking(false);
@@ -1410,10 +1464,19 @@ async function askModel(q){
 
 async function ask(q){
   const t = q.toLowerCase().trim();
+  if (compose.active) return compose.handle(q);
+  if (/\b(open|unlock)\b.*\bvault\b|^unlock\b/.test(t)){
+    heard(q); sheetUnlock(); return;
+  }
+  if (/\b(lock|shut|close)\b.*\bvault\b/.test(t)){
+    heard(q); relock(); return say('Shut, sir.', 'Shut, sir.');
+  }
+  if (compose.looksLikeMessage(q)){ heard(q); return compose.begin(q); }
   heard(q);
 
   // Instant, offline-safe, and the one thing you ask most often.
   if (/^(what'?s?\s+)?(on\s+)?today\??$|what.*(on|happening).*today|brief|status report/.test(t)){
+    if (locked()) return requireVault(() => ask(q));
     const line = briefSentence(5);
     return say(esc(line).replace(/\. /g, '.<br>'), line);
   }
@@ -1430,9 +1493,12 @@ async function ask(q){
       return sheetViewDoc(hit.id);
     }
   }
+  if (locked() && /\b(diary|calendar|passport|licence|license|document|expir|contact|subscription|birthday|remind)\b/.test(t))
+    return requireVault(() => ask(q));
 
   // Adding something is a form, not a conversation.
   if (/^(add|note|remind me|put in|book)\b/.test(t)){
+    if (locked()) return requireVault(() => ask(q));
     const title = q.replace(/^(add|note|remind me to|remind me|put in|book)\s*/i, '').trim();
     say('Very good, sir. I have it open.', 'Very good, sir.');
     return sheetAddEvent({title: title, kind: /remind/.test(t) ? 'reminder' : 'appointment'});
@@ -1440,6 +1506,846 @@ async function ask(q){
 
   return askModel(q);
 }
+
+/* --------------------------------------------------------------- face */
+/* A scanned head with a full ARKit blendshape rig, rendered in WebGL as
+   polished metal. Jaw, lips, eyelids and brows are real morph targets, so
+   the mouth follows the speech rather than approximating it. three.js and
+   the model load only the first time the face is opened, so there is no
+   cost if you never use it. */
+const face = {
+  ready:false, loading:false, broken:false, open:false, raf:null, t0:0,
+  mouth:0, aim:0, blink:0, nextBlink:0,
+  brow:0, browAim:-0.12, smile:0, smileAim:0.04,
+  mood:'dry', talking:false, env:null, headSize:0,
+  dict:null, inf:null, mat:null, root:null,
+  renderer:null, scene:null, camera:null,
+  auto: localStorage.getItem('pa.face') !== 'off',
+
+  LIB: 'https://cdn.jsdelivr.net/npm/three@0.128.0/',
+
+  MOODS: {
+    dry:      {brow:-0.12, smile: 0.04, colour:0xb9c2cf, rough:0.16},
+    amused:   {brow: 0.28, smile: 0.34, colour:0xc2c4bd, rough:0.15},
+    concerned:{brow: 0.62, smile:-0.26, colour:0xc0a9a4, rough:0.24},
+    flat:     {brow: 0.00, smile: 0.00, colour:0xa8adb6, rough:0.30},
+    pleased:  {brow: 0.20, smile: 0.46, colour:0xb4c2b8, rough:0.17},
+    sharp:    {brow:-0.42, smile:-0.10, colour:0xc6bda4, rough:0.12}
+  },
+
+  script(src){
+    return new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = src; s.onload = res; s.onerror = () => rej(new Error(src));
+      document.head.appendChild(s);
+    });
+  },
+
+  async load(){
+    if (this.ready || this.broken) return this.ready;
+    if (this.loading) return false;
+    this.loading = true;
+    try {
+      await this.script(this.LIB + 'build/three.min.js');
+      await this.script(this.LIB + 'examples/js/libs/meshopt_decoder.js');
+      await this.script(this.LIB + 'examples/js/loaders/GLTFLoader.js');
+      await this.build();
+      this.ready = true;
+    } catch (e){
+      this.broken = true;
+      toast('The face will not load, sir. Everything else is unaffected.');
+    }
+    this.loading = false;
+    return this.ready;
+  },
+
+  /* Chrome is mostly reflection, so this painted studio does more work
+     than the lights: an overhead panel, two strips, a dark floor. */
+  studio(){
+    const c = document.createElement('canvas');
+    c.width = 1024; c.height = 512;
+    const x = c.getContext('2d');
+    const g = x.createLinearGradient(0, 0, 0, 512);
+    g.addColorStop(0.00,'#cdd6e4'); g.addColorStop(0.42,'#7d8798');
+    g.addColorStop(0.50,'#2a2f3a'); g.addColorStop(0.52,'#161a22');
+    g.addColorStop(1.00,'#05070b');
+    x.fillStyle = g; x.fillRect(0,0,1024,512);
+    x.fillStyle = '#ffffff';
+    x.globalAlpha = 0.95; x.fillRect(180,16,300,96);
+    x.globalAlpha = 0.55; x.fillRect(640,40,150,60);
+    x.globalAlpha = 0.30; x.fillRect(0,150,1024,10);
+    x.globalAlpha = 0.22;
+    x.fillStyle = '#9fd8ff'; x.fillRect(820,120,60,200);
+    x.fillStyle = '#ffd9a0'; x.fillRect(90,130,44,180);
+    x.globalAlpha = 1;
+    const t = new THREE.CanvasTexture(c);
+    t.mapping = THREE.EquirectangularReflectionMapping;
+    t.encoding = THREE.sRGBEncoding;
+    return t;
+  },
+
+  build(){
+    return new Promise((res, rej) => {
+      const r = new THREE.WebGLRenderer({canvas: $('#face-cv'), antialias: true});
+      r.setPixelRatio(Math.min(devicePixelRatio, 2));
+      r.outputEncoding = THREE.sRGBEncoding;
+      r.toneMapping = THREE.ACESFilmicToneMapping;
+      r.toneMappingExposure = 1.05;
+      this.renderer = r;
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x05060a);
+      scene.environment = this.studio();
+      this.scene = scene;
+      this.camera = new THREE.PerspectiveCamera(26, 1, 0.01, 100);
+
+      const key  = new THREE.DirectionalLight(0xffffff, 1.5);  key.position.set(-1.4,1.8,1.6);
+      const fill = new THREE.DirectionalLight(0xbcd4ff, 0.55); fill.position.set(2.2,0.2,1.1);
+      const rim  = new THREE.DirectionalLight(0xffd9a8, 0.75); rim.position.set(0.4,0.9,-2.0);
+      scene.add(new THREE.AmbientLight(0xffffff, 0.22), key, fill, rim);
+
+      const loader = new THREE.GLTFLoader();
+      loader.setMeshoptDecoder(MeshoptDecoder);
+      loader.load('facecap.glb', gltf => {
+        const root = gltf.scene;
+        this.root = root; scene.add(root);
+
+        const chrome = new THREE.MeshStandardMaterial({
+          color: 0xb9c2cf, metalness: 1.0, roughness: 0.16, envMapIntensity: 1.35
+        });
+        this.mat = chrome;
+        root.traverse(o => {
+          if (!o.isMesh) return;
+          o.material = (o.name === 'eyeLeft' || o.name === 'eyeRight')
+            ? new THREE.MeshStandardMaterial({color:0x0d1016, metalness:0.9, roughness:0.08})
+            : chrome;
+          if (o.morphTargetDictionary){
+            this.dict = o.morphTargetDictionary; this.inf = o.morphTargetInfluences;
+          }
+        });
+
+        const box = new THREE.Box3().setFromObject(root);
+        const size = box.getSize(new THREE.Vector3());
+        root.position.sub(box.getCenter(new THREE.Vector3()));
+        this.headSize = size.y;
+        this.frame();
+        res();
+      }, undefined, () => rej(new Error('model')));
+    });
+  },
+
+  /* Aim above centre so the caption and controls sit under the chin
+     rather than across it. */
+  frame(){
+    if (!this.camera || !this.headSize) return;
+    const lift = this.headSize * 0.26;
+    const d = (this.headSize * 1.12) / (2 * Math.tan(this.camera.fov * Math.PI / 360));
+    this.camera.position.set(0, lift, d * 1.05);
+    this.camera.lookAt(0, lift, 0);
+  },
+
+  size(){
+    if (!this.renderer) return;
+    const el = $('#face');
+    const w = el.clientWidth, h = el.clientHeight;
+    this.renderer.setSize(w, h, false);
+    this.camera.aspect = w/h;
+    this.camera.updateProjectionMatrix();
+    this.frame();
+  },
+
+  async show(){
+    if (this.broken) return;
+    $('#face').hidden = false;
+    if (!this.ready){
+      $('#face-cap').textContent = 'One moment, sir…';
+      const ok = await this.load();
+      if (!ok){ $('#face').hidden = true; return; }
+      $('#face-cap').textContent = '';
+    }
+    if (this.open) return;
+    this.open = true;
+    this.t0 = performance.now();
+    this.nextBlink = performance.now() + 1600;
+    this.size();
+    this.loop();
+  },
+
+  hide(){
+    this.open = false;
+    $('#face').hidden = true;
+    cancelAnimationFrame(this.raf);
+  },
+
+  setMood(m){
+    const M = this.MOODS[m];
+    if (!M) return;
+    this.mood = m;
+    this.browAim = M.brow; this.smileAim = M.smile;
+    if (this.mat){ this.mat.color.setHex(M.colour); this.mat.roughness = M.rough; }
+  },
+
+  startTalk(text){
+    this.talking = true;
+    if (this.auto && !this.open) this.show();
+    const words = Math.max(1, (text || '').trim().split(/\s+/).length);
+    this.env = {t0: performance.now(), beats: Math.round(words*1.6), per: 135};
+  },
+  stopTalk(){ this.talking = false; this.env = null; this.aim = 0; },
+
+  /* With the ElevenLabs voice the audio is measurable, so the mouth can
+     follow the actual sound instead of an envelope. */
+  attach(audioEl){
+    try {
+      if (this.an || typeof THREE === 'undefined') return;
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const src = ctx.createMediaElementSource(audioEl);
+      this.an = ctx.createAnalyser(); this.an.fftSize = 512;
+      src.connect(this.an); this.an.connect(ctx.destination);
+      this.buf = new Uint8Array(this.an.frequencyBinCount);
+    } catch {}
+  },
+
+  level(){
+    if (this.an && this.talking){
+      this.an.getByteFrequencyData(this.buf);
+      let s = 0; for (let i = 2; i < 40; i++) s += this.buf[i];
+      return Math.min(1, s/(38*128));
+    }
+    if (!this.talking || !this.env) return 0;
+    const i = (performance.now() - this.env.t0)/this.env.per;
+    if (i > this.env.beats + 1){ this.talking = false; return 0; }
+    return Math.sin((i % 1)*Math.PI)*(0.5 + 0.5*Math.abs(Math.sin(i*2.7)));
+  },
+
+  loop(){
+    if (!this.open) return;
+    this.raf = requestAnimationFrame(() => this.loop());
+    const now = performance.now(), t = (now - this.t0)/1000;
+    const set = (n, v) => { if (this.dict && n in this.dict) this.inf[this.dict[n]] = v; };
+
+    this.aim = this.level();
+    this.mouth += (this.aim - this.mouth)*0.40;
+    this.brow  += (this.browAim - this.brow)*0.07;
+    this.smile += (this.smileAim - this.smile)*0.07;
+    if (now > this.nextBlink){ this.blink = 1; this.nextBlink = now + 2400 + Math.random()*4200; }
+    this.blink = Math.max(0, this.blink - 0.16);
+
+    const m = this.mouth;
+    set('jawOpen', m*0.75);
+    set('mouthFunnel', m*0.22*(0.5 + 0.5*Math.sin(t*7.3)));
+    set('mouthPucker', m*0.14*(0.5 + 0.5*Math.sin(t*4.1)));
+    set('mouthLowerDown_L', m*0.30); set('mouthLowerDown_R', m*0.30);
+    set('mouthUpperUp_L', m*0.18);   set('mouthUpperUp_R', m*0.18);
+    set('eyeBlink_L', this.blink);   set('eyeBlink_R', this.blink);
+    set('browInnerUp', Math.max(0, this.brow));
+    set('browOuterUp_L', Math.max(0, this.brow)*0.6);
+    set('browOuterUp_R', Math.max(0, this.brow)*0.6);
+    set('browDown_L', Math.max(0, -this.brow)); set('browDown_R', Math.max(0, -this.brow));
+    set('mouthSmile_L', Math.max(0, this.smile)); set('mouthSmile_R', Math.max(0, this.smile));
+    set('mouthFrown_L', Math.max(0, -this.smile)); set('mouthFrown_R', Math.max(0, -this.smile));
+
+    const gx = Math.sin(t*0.37)*0.5 + Math.sin(t*0.11)*0.3;
+    const gy = Math.sin(t*0.29 + 2)*0.3;
+    set('eyeLookOut_L', Math.max(0, gx)); set('eyeLookIn_R', Math.max(0, gx));
+    set('eyeLookIn_L', Math.max(0, -gx)); set('eyeLookOut_R', Math.max(0, -gx));
+    set('eyeLookUp_L', Math.max(0, gy)*0.5); set('eyeLookUp_R', Math.max(0, gy)*0.5);
+    set('eyeLookDown_L', Math.max(0, -gy)*0.5); set('eyeLookDown_R', Math.max(0, -gy)*0.5);
+
+    if (this.root){
+      this.root.rotation.y = Math.sin(t*0.23)*0.16 + Math.sin(t*0.52)*0.04;
+      this.root.rotation.x = Math.sin(t*0.31 + 1)*0.05;
+      this.root.rotation.z = Math.sin(t*0.19 + 2)*0.025;
+    }
+    this.renderer.render(this.scene, this.camera);
+  }
+};
+
+window.addEventListener('resize', () => { if (face.open) face.size(); });
+
+/* --------------------------------------------------------- lock state */
+/* The app is useful before the vault is open: weather, bank holidays,
+   general questions, dictating a message to a number you say aloud.
+   Only stored things need the key. */
+const locked = () => !S.key;
+
+const LOCKED_LINES = [
+  'That is behind the vault, sir.',
+  'The vault is shut. Say the word and I will open it.',
+  'I would need the vault open for that, sir.',
+  'Locked, I am afraid. Shall we?'
+];
+
+/* Anything touching stored data calls this first. */
+function requireVault(then){
+  if (!locked()) return true;
+  const line = pick(LOCKED_LINES);
+  say(esc(line), line);
+  sheetUnlock(then);
+  return false;
+}
+
+function lockNotice(what){
+  return '<div class="empty">' + esc(what) + ' lives behind the vault, sir.' +
+    '<div style="height:.9rem"></div>' +
+    '<button class="btn" onclick="sheetUnlock()">Open the vault</button></div>';
+}
+
+function relock(){
+  S.key = null;
+  mem.items = [];
+  S.docs = S.events = S.contacts = S.subs = [];
+  spokenBrief = true;
+  renderAll();
+  toast('Vault shut, sir.');
+}
+
+/* ------------------------------------------------------------ face id */
+/* Face ID cannot hand over an encryption key by itself — WebAuthn signs,
+   it doesn't decrypt. The PRF extension can return a secret tied to the
+   credential, and that is used here to wrap your passphrase. Without PRF
+   there is no honest way to do this, so the passphrase stays the route. */
+const bio = {
+  get cred(){ try { return JSON.parse(localStorage.getItem('pa.cred') || 'null'); } catch { return null; } },
+  set cred(v){ v ? localStorage.setItem('pa.cred', JSON.stringify(v)) : localStorage.removeItem('pa.cred'); },
+
+  available(){
+    return !!(window.PublicKeyCredential &&
+              navigator.credentials &&
+              window.isSecureContext);
+  },
+  enrolled(){ return !!this.cred; },
+
+  async keyFrom(secret){
+    const base = await crypto.subtle.importKey('raw', secret, 'HKDF', false, ['deriveKey']);
+    return crypto.subtle.deriveKey(
+      {name:'HKDF', hash:'SHA-256', salt: te.encode('pa.bio.v1'), info: te.encode('wrap')},
+      base, {name:'AES-GCM', length:256}, false, ['encrypt','decrypt']);
+  },
+
+  async enrol(passphrase){
+    if (!this.available()) throw new Error('This device will not do it, sir.');
+
+    const userId = crypto.getRandomValues(new Uint8Array(16));
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        rp: {name: 'PA', id: location.hostname},
+        user: {id: userId, name: 'vault', displayName: 'PA vault'},
+        pubKeyCredParams: [{type:'public-key', alg:-7}, {type:'public-key', alg:-257}],
+        authenticatorSelection: {
+          authenticatorAttachment: 'platform',
+          userVerification: 'required',
+          residentKey: 'required'
+        },
+        timeout: 60000,
+        extensions: {prf: {}}
+      }
+    });
+    if (!cred) throw new Error('Cancelled.');
+
+    const ext = cred.getClientExtensionResults();
+    if (!ext || !ext.prf || ext.prf.enabled !== true)
+      throw new Error('This iOS cannot tie a key to Face ID yet. Passphrase it is.');
+
+    const id = b64(cred.rawId);
+    const secret = await this.secretFor(id);
+    if (!secret) throw new Error('Face ID would not give up the key, sir.');
+
+    const wrapKey = await this.keyFrom(secret);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const wrapped = await crypto.subtle.encrypt({name:'AES-GCM', iv}, wrapKey, te.encode(passphrase));
+    this.cred = {id, iv: b64(iv), wrapped: b64(wrapped)};
+    return true;
+  },
+
+  async secretFor(id){
+    const assertion = await navigator.credentials.get({
+      publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        rpId: location.hostname,
+        allowCredentials: [{type:'public-key', id: unb64(id)}],
+        userVerification: 'required',
+        timeout: 60000,
+        extensions: {prf: {eval: {first: te.encode('pa-vault-prf')}}}
+      }
+    });
+    const ext = assertion && assertion.getClientExtensionResults();
+    const first = ext && ext.prf && ext.prf.results && ext.prf.results.first;
+    return first ? new Uint8Array(first) : null;
+  },
+
+  /* Returns the passphrase, or throws. */
+  async recover(){
+    const c = this.cred;
+    if (!c) throw new Error('Face ID is not set up, sir.');
+    if (c.mode === 'weak') return this.recoverWeak();
+    const secret = await this.secretFor(c.id);
+    if (!secret) throw new Error('Face ID would not give up the key, sir.');
+    const wrapKey = await this.keyFrom(secret);
+    const pt = await crypto.subtle.decrypt(
+      {name:'AES-GCM', iv: unb64(c.iv)}, wrapKey, unb64(c.wrapped));
+    return td.decode(pt);
+  },
+
+  /* Second best, offered only when PRF is unavailable. The passphrase is
+     encrypted with a key sitting in this browser's own storage, so the
+     Face ID check is a gate on the interface rather than on the maths.
+     Anyone who can read this phone's storage can recover the passphrase. */
+  async enrolWeak(passphrase){
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        rp: {name: 'PA', id: location.hostname},
+        user: {id: crypto.getRandomValues(new Uint8Array(16)),
+               name: 'vault', displayName: 'PA vault'},
+        pubKeyCredParams: [{type:'public-key', alg:-7}, {type:'public-key', alg:-257}],
+        authenticatorSelection: {authenticatorAttachment:'platform',
+                                 userVerification:'required', residentKey:'required'},
+        timeout: 60000
+      }
+    });
+    if (!cred) throw new Error('Cancelled.');
+
+    const dk = crypto.getRandomValues(new Uint8Array(32));
+    const wrapKey = await crypto.subtle.importKey('raw', dk, 'AES-GCM', false, ['encrypt','decrypt']);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const wrapped = await crypto.subtle.encrypt({name:'AES-GCM', iv}, wrapKey, te.encode(passphrase));
+    this.cred = {mode:'weak', id: b64(cred.rawId), iv: b64(iv),
+                 wrapped: b64(wrapped), dk: b64(dk)};
+    return true;
+  },
+
+  async recoverWeak(){
+    const c = this.cred;
+    await navigator.credentials.get({
+      publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        rpId: location.hostname,
+        allowCredentials: [{type:'public-key', id: unb64(c.id)}],
+        userVerification: 'required',
+        timeout: 60000
+      }
+    });
+    const wrapKey = await crypto.subtle.importKey('raw', unb64(c.dk), 'AES-GCM', false, ['decrypt']);
+    const pt = await crypto.subtle.decrypt({name:'AES-GCM', iv: unb64(c.iv)}, wrapKey, unb64(c.wrapped));
+    return td.decode(pt);
+  },
+
+  forget(){ this.cred = null; }
+};
+
+/* --------------------------------------------------------- unlock UI */
+let afterUnlock = null;
+
+function sheetUnlock(then){
+  afterUnlock = then || null;
+  openSheet(
+    '<h2>The vault</h2>' +
+    (bio.enrolled()
+      ? '<button class="btn" id="u-face">Unlock with Face ID</button>' +
+        '<div style="height:1rem"></div>' +
+        '<p class="small muted">Or the passphrase:</p>'
+      : '') +
+    '<input id="u-pass" type="password" autocomplete="off" placeholder="Passphrase">' +
+    '<div style="height:.8rem"></div>' +
+    '<button class="btn" id="u-go">Open</button>' +
+    '<div style="height:.6rem"></div>' +
+    '<button class="btn ghost" onclick="closeSheet()">Not now</button>');
+
+  setTimeout(() => { if (!bio.enrolled()) $('#u-pass').focus(); }, 120);
+
+  if (bio.enrolled()) $('#u-face').onclick = async () => {
+    const b = $('#u-face'); b.disabled = true; b.textContent = 'Looking…';
+    try { await openWith(await bio.recover()); }
+    catch (e){ b.disabled = false; b.textContent = 'Unlock with Face ID'; toast(e.message); }
+  };
+
+  $('#u-go').onclick = async () => {
+    const b = $('#u-go'), p = $('#u-pass').value;
+    if (p.length < 8) return toast('Eight characters at the very least, sir.');
+    b.disabled = true; b.textContent = 'A moment, sir…';
+    try { await openWith(p); }
+    catch (e){ b.disabled = false; b.textContent = 'Open'; toast(e.message); }
+  };
+}
+
+async function openWith(passphrase){
+  const isNew = await openVault(passphrase);
+  closeSheet();
+  await loadAll();
+  await mem.load();
+  renderAll();
+  scheduleAlerts();
+  spokenBrief = false;
+  speakBriefOnce();
+  autolock.touch();
+  if (isNew) toast('Vault created, sir. Write that passphrase down. I am entirely serious.');
+  const next = afterUnlock; afterUnlock = null;
+  if (next) setTimeout(next, 200);
+}
+
+/* ---------------------------------------------------------- auto-lock */
+/* Idle timer while you're in the app, plus a short grace period when you
+   leave it — long enough for a WhatsApp round trip, short enough that a
+   pocketed phone shuts itself. Closing the app loses the key outright:
+   it only ever lives in memory. */
+const autolock = {
+  mins: +(localStorage.getItem('pa.autolock') || 5),   // 0 = never
+  idle: null, away: null,
+
+  set(m){
+    this.mins = m;
+    localStorage.setItem('pa.autolock', String(m));
+    this.touch();
+  },
+
+  touch(){
+    clearTimeout(this.idle);
+    if (locked() || !this.mins) return;
+    this.idle = setTimeout(() => {
+      if (!locked()){ relock(); voice.speak('Vault shut, sir. It had been a while.'); }
+    }, this.mins * 60000);
+  },
+
+  left(){
+    clearTimeout(this.away);
+    if (locked() || !this.mins) return;
+    this.away = setTimeout(() => { if (!locked()) relock(); }, 90000);
+  },
+
+  back(){ clearTimeout(this.away); this.touch(); }
+};
+
+['touchstart','click','keydown'].forEach(ev =>
+  document.addEventListener(ev, () => autolock.touch(), {passive: true}));
+
+/* --------------------------------------------------------- wake word */
+/* Safari hands out recognition in short bursts, so "always listening"
+   means restarting the moment each one ends. There's a hair of deafness
+   between sessions — occasionally you'll have to say it twice. When the
+   phone locks, iOS takes the microphone back; unlocking tries to grab it
+   again, and offers a tap if it's refused. */
+const wake = {
+  on: localStorage.getItem('pa.wake') === 'on',
+  word: (localStorage.getItem('pa.wakeword') || 'jarvis').toLowerCase(),
+  rec: null, running: false, awake: false, sleepTimer: null,
+
+  set(on){
+    this.on = on;
+    localStorage.setItem('pa.wake', on ? 'on' : 'off');
+    on ? this.start() : this.stop();
+  },
+  setWord(w){
+    this.word = (w || 'jarvis').trim().toLowerCase();
+    localStorage.setItem('pa.wakeword', this.word);
+  },
+
+  start(){
+    if (!Rec || !this.on || this.running || rec) return;   // never fight the tap-to-talk mic
+    try {
+      this.rec = new Rec();
+      this.rec.lang = 'en-GB';
+      this.rec.continuous = true;
+      this.rec.interimResults = true;
+      this.rec.onresult = e => this.heard(e);
+      this.rec.onerror = ev => {
+        if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed'){
+          this.running = false; this.needsTap(); return;
+        }
+      };
+      this.rec.onend = () => {
+        this.running = false;
+        if (this.on && !rec) setTimeout(() => this.start(), 250);
+      };
+      this.rec.start();
+      this.running = true;
+      this.badge(true);
+    } catch { this.running = false; }
+  },
+
+  stop(){
+    this.on = false; this.running = false; this.awake = false;
+    try { this.rec && this.rec.stop(); } catch {}
+    this.rec = null;
+    this.badge(false);
+  },
+
+  pause(){ this.running = false; try { this.rec && this.rec.stop(); } catch {} this.rec = null; },
+  resume(){ if (this.on) setTimeout(() => this.start(), 300); },
+
+  heard(e){
+    const last = e.results[e.results.length - 1];
+    if (!last.isFinal) return;
+    const text = last[0].transcript.trim();
+    if (!text) return;
+
+    if (!this.awake){
+      const lower = text.toLowerCase();
+      const i = lower.indexOf(this.word);
+      if (i === -1) return;                 // discarded here, never sent anywhere
+      const after = text.slice(i + this.word.length).replace(/^[\s,.:;-]+/, '');
+      this.rouse(after);
+      return;
+    }
+
+    clearTimeout(this.sleepTimer);
+    this.sleepTimer = setTimeout(() => this.doze(), 25000);
+    if (compose.active) compose.handle(text);
+    else { this.doze(); ask(text); }
+  },
+
+  rouse(rest){
+    this.awake = true;
+    this.badge(true);
+    clearTimeout(this.sleepTimer);
+    this.sleepTimer = setTimeout(() => this.doze(), 25000);
+    if (rest && rest.split(/\s+/).length > 1){
+      if (compose.looksLikeMessage(rest)) return compose.begin(rest);
+      return ask(rest);
+    }
+    voice.speak(pick(['Sir?', 'Yes, sir.', 'At your service.', 'Listening, sir.']));
+  },
+
+  doze(){
+    this.awake = false;
+    clearTimeout(this.sleepTimer);
+    this.badge(true);
+  },
+
+  needsTap(){
+    const b = $('#wake-bar');
+    b.hidden = false;
+    b.onclick = () => { b.hidden = true; this.start(); };
+  },
+
+  badge(){
+    const el = $('#wake-dot');
+    if (!el) return;
+    el.hidden = !this.on;
+    el.textContent = this.awake ? '● listening' : '○ ' + this.word;
+  }
+};
+
+/* iOS releases the mic on lock or app switch. Try to take it back. */
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible'){
+    autolock.back();
+    if (wake.on) { wake.pause(); wake.resume(); }
+  } else {
+    autolock.left();
+    wake.pause();
+  }
+});
+
+/* ------------------------------------------------------------ compose */
+/* Fills in WhatsApp, Messages or Mail and hands it to you. iOS will not
+   let any app press send in another app, so the last tap is always yours. */
+const READY = [
+  'That is all ready for you to send, sir.',
+  'Ready and waiting, sir. Yours to send.',
+  'Written and loaded, sir. The send button is your department.',
+  'There you are, sir. One tap and it is gone.',
+  'All set, sir. I will leave the sending to you.',
+  'Done, sir. Read it back before you send it, if you have any sense.'
+];
+
+function intlNumber(raw){
+  let n = String(raw || '').replace(/[^\d+]/g, '');
+  if (n.startsWith('+'))  return n.slice(1);
+  if (n.startsWith('00')) return n.slice(2);
+  if (n.startsWith('0'))  return '44' + n.slice(1);     // UK unless told otherwise
+  return n;
+}
+
+const compose = {
+  active: false, channel: null, to: null, contact: null,
+  subject: null, body: null, awaiting: null, nudge: null, options: null,
+
+  reset(){
+    clearTimeout(this.nudge);
+    Object.assign(this, {active:false, channel:null, to:null, contact:null,
+      subject:null, body:null, awaiting:null, nudge:null, options:null});
+  },
+
+  looksLikeMessage(t){
+    if (!this.channelOf(t)) return false;
+    return /\b(send|write|message|text|email|tell\w*|say|drop|shoot|fire)\b/i.test(t) ||
+           /^\s*(whats ?app|text|email|sms|message)\b/i.test(t);
+  },
+
+  channelOf(t){
+    if (/\bwhats ?app\b/i.test(t)) return 'whatsapp';
+    if (/\be ?mail\b/i.test(t))    return 'email';
+    if (/\b(text|sms|message)\b/i.test(t)) return 'sms';
+    return null;
+  },
+
+  /* "to Dave" is ambiguous — "I want to send" has a "to" in it as well.
+     Scan every "to" and keep the last candidate that isn't swallowing a verb. */
+  recipientIn(t){
+    const stop = /\b(send|write|whats ?app|e ?mail|text|sms|message|want|like|going|need)\b/i;
+    const tail = '(?=\\s+(saying|telling|that says|that|about|regarding|with|and\\s+say|and\\s+tell)\\b|[,.!?]|$)';
+    const name = "((?:the\\s+)?[a-z][a-z'\\- ]{1,28}?)";
+    let found = null;
+
+    const re = /\bto\s+/gi;
+    let m;
+    while ((m = re.exec(t)) !== null){
+      const rest = t.slice(m.index + m[0].length);
+      const hit = rest.match(new RegExp('^' + name + tail, 'i'));
+      if (hit && !stop.test(hit[1])) found = hit[1].trim();
+      re.lastIndex = m.index + m[0].length;   // don't skip later "to"s
+    }
+    if (found) return found;
+
+    // "whatsapp mum telling her..." / "email the accountant about..."
+    const direct = t.match(new RegExp(
+      '(?:whats ?app|e ?mail|text|sms|message)\\s+(?!to\\b)' + name + tail, 'i'));
+    if (direct && !stop.test(direct[1])) return direct[1].trim();
+    return null;
+  },
+
+  begin(utterance){
+    this.reset();
+    this.active = true;
+    this.channel = this.channelOf(utterance);
+    this.to = this.recipientIn(utterance);
+
+    const body = utterance.match(/\b(?:saying|telling (?:him|her|them)|that says|and say|and tell (?:him|her|them))\s+(.+)$/i);
+    if (body) this.body = body[1].trim().replace(/[.]$/, '');
+
+    if (this.channel === 'email'){
+      const subj = utterance.match(/\b(?:about|regarding|re)\s+(.+?)(?=\s+(saying|and say)\b|[,.!?]|$)/i);
+      if (subj) this.subject = subj[1].trim();
+    }
+
+    this.next();
+  },
+
+  say(line){
+    say(esc(line), line);
+    clearTimeout(this.nudge);
+    this.nudge = setTimeout(() => {
+      if (this.active && this.awaiting)
+        voice.speak(pick(['Whenever you are ready, sir.',
+                          'Still with you, sir.',
+                          'Take your time. I am listening.']));
+    }, 9000);
+  },
+
+  next(){
+    if (!this.channel){
+      this.awaiting = 'channel';
+      return this.say('WhatsApp, text or email, sir?');
+    }
+    if (!this.to){
+      this.awaiting = 'to';
+      return this.say('Who am I sending it to?');
+    }
+    if (!this.contact && !this.resolve()) return;
+    if (this.channel === 'email' && !this.subject){
+      this.awaiting = 'subject';
+      return this.say('What shall I put as the subject?');
+    }
+    if (!this.body){
+      this.awaiting = 'body';
+      return this.say(pick(['And what would you like it to say?',
+                            'Go ahead, sir. I am taking it down.',
+                            'What am I writing?']));
+    }
+    this.finish();
+  },
+
+  /* Match against the contacts already in the vault. */
+  resolve(){
+    const want = this.to.toLowerCase().trim();
+    const needsEmail = this.channel === 'email';
+    const usable = S.contacts.filter(c => needsEmail ? c._.email : c._.phone);
+    let hits = usable.filter(c => (c._.name || '').toLowerCase().includes(want));
+    if (!hits.length)
+      hits = usable.filter(c => want.split(/\s+/)
+        .some(w => w.length > 2 && (c._.name || '').toLowerCase().includes(w)));
+
+    if (hits.length === 1){ this.contact = hits[0]; return true; }
+
+    if (hits.length > 1){
+      this.options = hits;
+      this.awaiting = 'which';
+      this.say('You have ' + hits.length + ' of those, sir. ' +
+        hits.map(c => c._.name + (c._.relationship ? ', the ' + c._.relationship : ''))
+            .join('; or ') + '. Which one?');
+      return false;
+    }
+
+    this.awaiting = 'detail';
+    this.say('I have no ' + (needsEmail ? 'email address' : 'number') +
+      ' for ' + this.to + ', sir. Give it to me and I will use it this once.');
+    return false;
+  },
+
+  handle(text){
+    const t = text.trim();
+    if (!t) return;
+    clearTimeout(this.nudge);
+    if (/^(cancel|stop|forget it|never mind)\b/i.test(t)){
+      this.reset();
+      return say('Dropped, sir.', 'Dropped, sir.');
+    }
+    heard(t);
+
+    switch (this.awaiting){
+      case 'channel': this.channel = this.channelOf(t) || null; break;
+      case 'to':      this.to = t.replace(/^(to\s+)?/i, '').replace(/[.,]$/, ''); break;
+      case 'which': {
+        const m = this.options.find(c =>
+          (c._.name || '').toLowerCase().includes(t.toLowerCase().split(/\s+/)[0]) ||
+          (c._.relationship || '').toLowerCase().includes(t.toLowerCase()));
+        if (m) this.contact = m;
+        break;
+      }
+      case 'detail': {
+        const val = t.replace(/\s+/g, '');
+        this.contact = {_: this.channel === 'email' ? {name: this.to, email: val}
+                                                    : {name: this.to, phone: val}};
+        break;
+      }
+      case 'subject': this.subject = t.replace(/[.]$/, ''); break;
+      case 'body':    this.body = t; break;
+    }
+    this.awaiting = null;
+    this.next();
+  },
+
+  finish(){
+    const c = this.contact._;
+    let url;
+
+    if (this.channel === 'whatsapp'){
+      url = 'https://wa.me/' + intlNumber(c.phone) + '?text=' + encodeURIComponent(this.body);
+    } else if (this.channel === 'sms'){
+      url = 'sms:' + (c.phone || '').replace(/\s/g, '') +
+            '&body=' + encodeURIComponent(this.body);
+    } else {
+      url = 'mailto:' + c.email +
+            '?subject=' + encodeURIComponent(this.subject || '') +
+            '&body=' + encodeURIComponent(this.body);
+    }
+
+    const line = pick(READY);
+    say('<b>' + esc(c.name) + '</b><br>' +
+        (this.subject ? esc(this.subject) + '<br>' : '') +
+        '<span class="muted">' + esc(this.body) + '</span><br><br>' + esc(line), line);
+
+    const target = this.channel;
+    this.reset();
+    wake.pause();
+    setTimeout(() => {
+      if (target === 'whatsapp') window.open(url, '_blank');
+      else location.href = url;
+    }, 1400);      // let it finish speaking before the app switch
+  }
+};
 
 /* ------------------------------------------------------------- alerts */
 let alertTimers = [];
@@ -1474,9 +2380,11 @@ function show(view){
 }
 
 $$('#tabs button').forEach(b => b.onclick = () => show(b.dataset.view));
-$('#v-add').onclick = () => sheetAddDoc();
-$('#c-add').onclick = () => sheetAddEvent();
-$('#p-add').onclick = () => sheetAddPerson();
+$('#a-face').onclick = () => face.show();
+$('#face-x').onclick = () => face.hide();
+$('#v-add').onclick = () => requireVault(() => sheetAddDoc()) && sheetAddDoc();
+$('#c-add').onclick = () => requireVault(() => sheetAddEvent()) && sheetAddEvent();
+$('#p-add').onclick = () => requireVault(() => sheetAddPerson()) && sheetAddPerson();
 
 document.addEventListener('click', e => {
   const b = e.target.closest('[data-doc],[data-evt],[data-open]');
@@ -1552,11 +2460,92 @@ $('#a-voice').onclick = () => {
     '<p class="small muted">On the iPhone, download Daniel (Premium) under Settings, ' +
       'Accessibility, Spoken Content, Voices. The compact one is dreadful.</p>' +
     '<div style="height:.8rem"></div>' +
+    '<label><input type="checkbox" id="f-wake" style="width:auto;margin-right:.5rem"' +
+      (wake.on ? ' checked' : '') + '>Listen for a wake word while open</label>' +
+    '<input id="f-word" value="' + esc(wake.word) + '" placeholder="jarvis">' +
+    '<p class="small muted">Only works while the app is on screen, and it will ' +
+      'drink your battery. Everything not matching the wake word is discarded on ' +
+      'the phone and never sent anywhere.</p>' +
+    '<div style="height:.8rem"></div>' +
     '<button class="btn ghost" id="f-try">Let me hear it</button>' +
+    '<div style="height:1.4rem"></div>' +
+    '<div class="group">The vault</div>' +
+    (locked()
+      ? '<button class="btn" id="f-open">Open the vault</button>'
+      : '<button class="btn ghost" id="f-face">' +
+          (bio.enrolled() ? 'Forget Face ID' : 'Unlock with Face ID in future') + '</button>' +
+        '<div style="height:.6rem"></div>' +
+        '<button class="btn ghost" id="f-lock">Shut the vault now</button>') +
+    '<label><input type="checkbox" id="f-faceauto" style="width:auto;margin-right:.5rem"' +
+      (face.auto ? ' checked' : '') + '>Show the face whenever it speaks</label>' +
+    '<div style="height:.8rem"></div>' +
+    '<label for="f-auto">Shut the vault after</label>' +
+    '<select id="f-auto">' +
+      [[1,'1 minute'],[5,'5 minutes'],[15,'15 minutes'],[60,'an hour'],[0,'never']]
+        .map(o => '<option value="' + o[0] + '"' +
+          (autolock.mins === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('') +
+    '</select>' +
+    '<p class="small muted">It also shuts if you leave the app for more than a ' +
+      'minute and a half, and whenever the app is closed outright.</p>' +
+    '<div style="height:.6rem"></div>' +
+    '<button class="btn danger" id="f-out">Sign out</button>' +
     '<div style="height:.6rem"></div>' +
     '<button class="btn" onclick="closeSheet()">Done</button>');
   $('#f-voice').onchange = e => voice.set(e.target.value);
   $('#f-remote').onchange = e => voice.setRemote(e.target.checked);
+  $('#f-wake').onchange = e => {
+    wake.set(e.target.checked);
+    toast(e.target.checked ? 'Listening, sir.' : 'Ears off, sir.');
+  };
+  $('#f-word').onchange = e => { wake.setWord(e.target.value); wake.badge(); };
+  $('#f-auto').onchange = e => autolock.set(+e.target.value);
+  $('#f-faceauto').onchange = e => {
+    face.auto = e.target.checked;
+    localStorage.setItem('pa.face', e.target.checked ? 'on' : 'off');
+  };
+  if ($('#f-open')) $('#f-open').onclick = () => sheetUnlock();
+  if ($('#f-lock')) $('#f-lock').onclick = () => { closeSheet(); relock(); };
+  if ($('#f-out'))  $('#f-out').onclick  = () => signOut();
+
+  if ($('#f-face')) $('#f-face').onclick = async () => {
+    if (bio.enrolled()){
+      bio.forget();
+      closeSheet();
+      return toast('Face ID forgotten, sir. Passphrase from now on.');
+    }
+    if (!bio.available())
+      return toast('This browser will not do Face ID, sir.');
+
+    const p = prompt('Your passphrase, to tie it to Face ID:');
+    if (!p) return;
+    try {
+      // Prove it's the right one before wrapping it.
+      const meta = (await db.select('pa_meta', `user_id=eq.${uid()}&select=*`))[0];
+      const test = await deriveKey(p, meta.kdf_salt, meta.kdf_iters || CFG.kdfIters);
+      const saved = S.key; S.key = test;
+      const ok = await decStr(meta.verifier).catch(() => null);
+      S.key = saved;
+      if (ok !== 'pa-vault-ok') return toast('That is not the passphrase, sir.');
+
+      try {
+        await bio.enrol(p);
+        closeSheet();
+        return toast('Face ID it is, sir. The passphrase still works.');
+      } catch (prfErr){
+        const weaker = confirm(
+          'This iOS cannot tie a key to Face ID properly.\n\n' +
+          'There is a lesser version: your passphrase is kept in this browser\'s ' +
+          'storage and Face ID guards the button rather than the maths. Anyone ' +
+          'who can read this phone\'s storage could recover it.\n\n' +
+          'Use the lesser version?');
+        if (!weaker) return toast('Passphrase it stays, sir. Probably wise.');
+        await bio.enrolWeak(p);
+        closeSheet();
+        toast('Done, sir — the lesser version. Keep the phone locked.');
+      }
+    } catch (e){ toast(e.message || 'Face ID would not play along, sir.'); }
+  };
+
   $('#f-try').onclick = () => voice.speak(
     'Good evening, sir. Two things want your attention, and one of them you have ' +
     'been ignoring since Tuesday.');
@@ -1575,40 +2564,22 @@ $('#g-signin').onclick = async () => {
   }
 };
 
-function toUnlock(){
-  $('#step-signin').hidden = true;
-  $('#step-unlock').hidden = false;
-  $('#gate-lede').textContent = 'The vault, sir.';
-  setTimeout(() => $('#g-pass').focus(), 100);
+async function toUnlock(){
+  $('#gate').hidden = true;
+  $('#app').hidden = false;
+  renderAll();
+  show('brief');
+  loadContext();
+  if ('Notification' in window && Notification.permission === 'default')
+    Notification.requestPermission();
+  if (wake.on) setTimeout(() => wake.start(), 1200);
+  setTimeout(() => {
+    const h = new Date().getHours();
+    voice.speak((h < 12 ? 'Good morning, sir.' : h < 18 ? 'Good afternoon, sir.' : 'Good evening, sir.') +
+      ' The vault is shut. Ask when you want it open.');
+  }, 600);
 }
 
-$('#g-out').onclick = signOut;
-
-$('#g-unlock').onclick = async () => {
-  const btn = $('#g-unlock'), pass = $('#g-pass').value;
-  if (pass.length < 8){ toast('Eight characters at the very least, sir.'); return; }
-  btn.disabled = true; btn.textContent = 'A moment, sir…';
-  try {
-    const isNew = await openVault(pass);
-    $('#g-pass').value = '';
-    btn.disabled = false; btn.textContent = 'Unlock';
-    $('#gate').hidden = true;
-    $('#app').hidden = false;
-    await loadAll();
-    await mem.load();
-    renderAll();
-    show('brief');
-    loadContext();
-    setTimeout(speakBriefOnce, 3500);   // fallback if the forecast is slow
-    if ('Notification' in window && Notification.permission === 'default')
-      Notification.requestPermission().then(scheduleAlerts);
-    else scheduleAlerts();
-    if (isNew) toast('Vault created, sir. Write that passphrase down. I am entirely serious.');
-  } catch (err){
-    toast(err.message);
-    btn.disabled = false; btn.textContent = 'Unlock';
-  }
-};
 
 /* --------------------------------------------------------------- boot */
 (async function boot(){
