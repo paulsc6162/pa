@@ -1,0 +1,5 @@
+# Tell Netlify exactly where things are rather than relying on detection.
+[build]
+  publish = "."
+  functions = "netlify/functions"
+  command = ""
