@@ -65,6 +65,7 @@ label{display:block;margin:.9rem 0 .3rem;color:var(--muted);font-size:.85rem}
 #gate{
   min-height:100dvh;display:flex;flex-direction:column;justify-content:center;
   padding:2rem 1.4rem calc(2rem + env(safe-area-inset-bottom));
+  max-width:520px;margin:0 auto;
 }
 #gate[hidden]{display:none}
 #gate h1{margin-bottom:.2rem}
@@ -80,7 +81,10 @@ label{display:block;margin:.9rem 0 .3rem;color:var(--muted);font-size:.85rem}
 
 /* ---------------------------------------------------------------- app */
 #app[hidden]{display:none}
-main{padding:calc(1rem + env(safe-area-inset-top)) 1.1rem 6.5rem}
+main{
+  padding:calc(1rem + env(safe-area-inset-top)) 1.1rem 6.5rem;
+  max-width:640px;margin:0 auto;      /* a phone column, centred on a tablet */
+}
 section[hidden]{display:none}
 .head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:1.2rem}
 .head .date{font-family:var(--serif);font-size:.95rem;color:var(--muted)}
@@ -108,7 +112,8 @@ section[hidden]{display:none}
 
 /* tabs */
 #tabs{
-  position:fixed;left:0;right:0;bottom:0;display:flex;
+  position:fixed;left:50%;transform:translateX(-50%);
+  width:100%;max-width:640px;bottom:0;z-index:14;display:flex;
   background:rgba(18,22,31,.93);backdrop-filter:blur(14px);
   border-top:1px solid var(--line);
   padding:.5rem .4rem calc(.5rem + env(safe-area-inset-bottom));
@@ -122,14 +127,16 @@ section[hidden]{display:none}
 #sheet.open{display:block}
 #sheet .scrim{position:absolute;inset:0;background:rgba(6,8,12,.6)}
 #sheet .panel{
-  position:absolute;left:0;right:0;bottom:0;max-height:92dvh;overflow:auto;
+  position:absolute;left:50%;transform:translateX(-50%);
+  width:100%;max-width:640px;bottom:0;max-height:92dvh;overflow:auto;
   background:var(--raised);border-top:1px solid var(--line);
   border-radius:18px 18px 0 0;padding:1.2rem 1.1rem calc(1.6rem + env(safe-area-inset-bottom));
 }
 #sheet .grab{width:34px;height:4px;border-radius:2px;background:var(--line);margin:0 auto 1rem}
 @media (prefers-reduced-motion:no-preference){
   #sheet.open .panel{animation:rise .22s cubic-bezier(.2,.8,.3,1)}
-  @keyframes rise{from{transform:translateY(14px);opacity:.6}}
+  @keyframes rise{from{transform:translateX(-50%) translateY(14px);opacity:.6}
+               to{transform:translateX(-50%) translateY(0);opacity:1}}
 }
 .docimg{width:100%;border-radius:10px;border:1px solid var(--line);display:block;margin:.8rem 0}
 
@@ -139,7 +146,9 @@ section[hidden]{display:none}
 .bubble.pa{border:1px solid var(--line)}
 .bubble.pa p:first-child{margin-top:0}
 .askbar{
-  position:fixed;left:0;right:0;bottom:calc(58px + env(safe-area-inset-bottom));
+  position:fixed;left:50%;transform:translateX(-50%);
+  width:100%;max-width:640px;z-index:14;
+  bottom:calc(58px + env(safe-area-inset-bottom));
   padding:.6rem .9rem;background:var(--ground);border-top:1px solid var(--line);
   display:flex;gap:.5rem;align-items:center
 }
@@ -153,21 +162,21 @@ section[hidden]{display:none}
 }
 #toast.show{display:block}
 
-#face{position:fixed;inset:0;z-index:25;background:#0b0e14}
+#face{position:fixed;inset:0;z-index:8;background:#05060a}
 #face[hidden]{display:none}
 #face-cv{position:absolute;inset:0;width:100%;height:100%;display:block}
 #face-cap{
-  position:absolute;left:1.2rem;right:1.2rem;
-  bottom:calc(4.4rem + env(safe-area-inset-bottom));
-  color:var(--paper);font-size:1rem;line-height:1.45;text-align:center;
-  text-shadow:0 2px 14px rgba(0,0,0,.95);max-height:26vh;overflow:auto
+  position:absolute;left:50%;transform:translateX(-50%);
+  width:calc(100% - 2.4rem);max-width:620px;z-index:10;
+  bottom:calc(9.5rem + env(safe-area-inset-bottom));
+  color:var(--paper);font-size:1rem;line-height:1.5;text-align:center;
+  text-shadow:0 2px 16px rgba(0,0,0,.98);max-height:24vh;overflow:auto
 }
 #face-x{
-  position:absolute;left:50%;transform:translateX(-50%);
-  bottom:calc(1.2rem + env(safe-area-inset-bottom));
+  position:absolute;top:calc(.7rem + env(safe-area-inset-top));right:.9rem;z-index:10;
   border:1px solid var(--line);color:var(--muted);
-  padding:.55rem 1.4rem;border-radius:10px;font-size:.85rem;
-  background:rgba(11,14,20,.7)
+  padding:.35rem .8rem;border-radius:8px;font-size:.78rem;
+  background:rgba(5,6,10,.7)
 }
 
 #wake-dot{
@@ -263,7 +272,7 @@ section[hidden]{display:none}
 <div id="face" hidden>
   <canvas id="face-cv"></canvas>
   <div id="face-cap"></div>
-  <button id="face-x" aria-label="Close">Close</button>
+  <button id="face-x" aria-label="Hide the face">Hide</button>
 </div>
 <div id="toast"></div>
 <div id="wake-dot" hidden></div>
@@ -507,6 +516,13 @@ let audioPrimed = false;
 function primeAudio(){
   if (audioPrimed) return;
   audioPrimed = true;
+  /* iOS refuses speechSynthesis until it has been called once from inside
+     a real tap. One empty utterance here buys every later one. */
+  try {
+    const u = new SpeechSynthesisUtterance(' ');
+    u.volume = 0;
+    speechSynthesis.speak(u);
+  } catch {}
   audio.src = 'data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tAwAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAADAAABgAAqKioqKioqKioqKioqKioqKlVVVVVVVVVVVVVVVVVVVVWAgICAgICAgICAgICAgICAqqqqqqqqqqqqqqqqqqqqqtXV1dXV1dXV1dXV1dXV1dX//////////////////////wAAAABMYXZjNTguMTMAAAAAAAAAAAAAAAAkAAAAAAAAAAABgJAV4H4AAAAAAAAAAAAAAAAAAAD/+0DEAAPAAAGkAAAAIAAANIAAAARMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU=';
   audio.play().catch(() => {});
 }
@@ -562,8 +578,8 @@ const voice = {
     }
   },
 
-  set(name){ this.chosen = name; localStorage.setItem('pa.voice', name); },
-  setRemote(on){ this.remote = on; localStorage.setItem('pa.remote', on ? 'on' : 'off'); }
+  set(name){ this.chosen = name; localStorage.setItem('pa.voice', name); prefs.save(); },
+  setRemote(on){ this.remote = on; localStorage.setItem('pa.remote', on ? 'on' : 'off'); prefs.save(); }
 };
 if ('speechSynthesis' in window){
   voice.load();
@@ -1636,12 +1652,17 @@ const face = {
 
   /* Aim above centre so the caption and controls sit under the chin
      rather than across it. */
+  /* Aim below the head so it sits high on screen, clear of the caption
+     and the controls. On a wide screen frame by width instead of height,
+     or the head shrinks into the middle. */
   frame(){
     if (!this.camera || !this.headSize) return;
-    const lift = this.headSize * 0.26;
-    const d = (this.headSize * 1.12) / (2 * Math.tan(this.camera.fov * Math.PI / 360));
-    this.camera.position.set(0, lift, d * 1.05);
-    this.camera.lookAt(0, lift, 0);
+    const el = $('#face');
+    const wide = el.clientWidth / Math.max(1, el.clientHeight);
+    const fit = this.headSize * (wide > 1 ? 1.30 : 1.02);
+    const d = fit / (2 * Math.tan(this.camera.fov * Math.PI / 360));
+    this.camera.position.set(0, 0, d);
+    this.camera.lookAt(0, -this.headSize * 0.30, 0);
   },
 
   size(){
@@ -1792,6 +1813,7 @@ function lockNotice(what){
 }
 
 function relock(){
+  sync.stop();
   S.key = null;
   mem.items = [];
   S.docs = S.events = S.contacts = S.subs = [];
@@ -1956,12 +1978,14 @@ function sheetUnlock(then){
   setTimeout(() => { if (!bio.enrolled()) $('#u-pass').focus(); }, 120);
 
   if (bio.enrolled()) $('#u-face').onclick = async () => {
+    primeAudio();
     const b = $('#u-face'); b.disabled = true; b.textContent = 'Looking…';
     try { await openWith(await bio.recover()); }
     catch (e){ b.disabled = false; b.textContent = 'Unlock with Face ID'; toast(e.message); }
   };
 
   $('#u-go').onclick = async () => {
+    primeAudio();                       // must happen inside the tap
     const b = $('#u-go'), p = $('#u-pass').value;
     if (p.length < 8) return toast('Eight characters at the very least, sir.');
     b.disabled = true; b.textContent = 'A moment, sir…';
@@ -1975,6 +1999,8 @@ async function openWith(passphrase){
   closeSheet();
   await loadAll();
   await mem.load();
+  await prefs.pull();
+  sync.start();
   renderAll();
   scheduleAlerts();
   spokenBrief = false;
@@ -1997,6 +2023,7 @@ const autolock = {
   set(m){
     this.mins = m;
     localStorage.setItem('pa.autolock', String(m));
+    prefs.save();
     this.touch();
   },
 
@@ -2020,6 +2047,102 @@ const autolock = {
 ['touchstart','click','keydown'].forEach(ev =>
   document.addEventListener(ev, () => autolock.touch(), {passive: true}));
 
+/* ---------------------------------------------------------------- sync */
+/* Two devices, one account. Data already lives in Supabase; these two
+   pieces keep them from drifting: settings travel with the account, and
+   whatever is on screen refreshes when you come back to the app.
+
+   Deliberately NOT synced: the Face ID credential, which is bound to its
+   own device and must be, and the session token. */
+const prefs = {
+  KEYS: ['pa.voice','pa.remote','pa.wake','pa.wakeword','pa.autolock','pa.face'],
+  loading: false,
+
+  local(){
+    const o = {};
+    for (const k of this.KEYS){
+      const v = localStorage.getItem(k);
+      if (v !== null) o[k] = v;
+    }
+    return o;
+  },
+
+  apply(o){
+    if (!o) return;
+    for (const k of this.KEYS) if (k in o) localStorage.setItem(k, o[k]);
+    // re-read the modules that cache their settings in memory
+    voice.chosen = localStorage.getItem('pa.voice') || voice.chosen;
+    voice.remote = localStorage.getItem('pa.remote') === 'on';
+    wake.word = (localStorage.getItem('pa.wakeword') || 'jarvis').toLowerCase();
+    autolock.mins = +(localStorage.getItem('pa.autolock') || 5);
+    face.auto = localStorage.getItem('pa.face') !== 'off';
+    const on = localStorage.getItem('pa.wake') !== 'off';
+    if (on !== wake.on){ wake.on = on; on ? wake.start() : wake.stop(); }
+    wake.badge();
+  },
+
+  /* At unlock: whichever side was edited more recently wins. */
+  async pull(){
+    try {
+      const row = (await db.select('pa_meta', `user_id=eq.${uid()}&select=prefs,prefs_updated`))[0];
+      if (!row || !row.prefs) return this.push();
+      const mineAt = +(localStorage.getItem('pa.prefs_at') || 0);
+      const theirs = new Date(row.prefs_updated).getTime();
+      if (theirs > mineAt){
+        this.apply(row.prefs);
+        localStorage.setItem('pa.prefs_at', String(theirs));
+      } else if (mineAt > theirs){
+        this.push();
+      }
+    } catch {}
+  },
+
+  async push(){
+    try {
+      const now = new Date().toISOString();
+      await api(`pa_meta?user_id=eq.${uid()}`, {
+        method: 'PATCH',
+        body: JSON.stringify({prefs: this.local(), prefs_updated: now})
+      });
+      localStorage.setItem('pa.prefs_at', String(Date.parse(now)));
+    } catch {}
+  },
+
+  /* Debounced: flicking three switches in a settings sheet is one write. */
+  save(){
+    clearTimeout(this._t);
+    this._t = setTimeout(() => this.push(), 900);
+  }
+};
+
+/* Whatever the other device did, pick it up on returning to this one. */
+const sync = {
+  last: 0, timer: null,
+
+  async refresh(force){
+    if (locked()) return;
+    const now = Date.now();
+    if (!force && now - this.last < 20000) return;   // don't thrash
+    this.last = now;
+    try {
+      await loadAll();
+      await mem.load();
+      renderAll();
+      scheduleAlerts();
+    } catch {}
+  },
+
+  start(){
+    clearInterval(this.timer);
+    // a quiet poll while you're actually looking at it
+    this.timer = setInterval(() => {
+      if (document.visibilityState === 'visible') this.refresh();
+    }, 45000);
+  },
+
+  stop(){ clearInterval(this.timer); }
+};
+
 /* --------------------------------------------------------- wake word */
 /* Safari hands out recognition in short bursts, so "always listening"
    means restarting the moment each one ends. There's a hair of deafness
@@ -2027,18 +2150,20 @@ const autolock = {
    phone locks, iOS takes the microphone back; unlocking tries to grab it
    again, and offers a tap if it's refused. */
 const wake = {
-  on: localStorage.getItem('pa.wake') === 'on',
+  on: localStorage.getItem('pa.wake') !== 'off',
   word: (localStorage.getItem('pa.wakeword') || 'jarvis').toLowerCase(),
   rec: null, running: false, awake: false, sleepTimer: null,
 
   set(on){
     this.on = on;
     localStorage.setItem('pa.wake', on ? 'on' : 'off');
+    prefs.save();
     on ? this.start() : this.stop();
   },
   setWord(w){
     this.word = (w || 'jarvis').trim().toLowerCase();
     localStorage.setItem('pa.wakeword', this.word);
+    prefs.save();
   },
 
   start(){
@@ -2123,7 +2248,7 @@ const wake = {
     const el = $('#wake-dot');
     if (!el) return;
     el.hidden = !this.on;
-    el.textContent = this.awake ? '● listening' : '○ ' + this.word;
+    el.textContent = this.awake ? '● listening' : '○ ' + this.word.charAt(0).toUpperCase() + this.word.slice(1);
   }
 };
 
@@ -2131,6 +2256,7 @@ const wake = {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible'){
     autolock.back();
+    sync.refresh(true);              // the other device may have moved on
     if (wake.on) { wake.pause(); wake.resume(); }
   } else {
     autolock.left();
@@ -2379,7 +2505,10 @@ function show(view){
   window.scrollTo(0, 0);
 }
 
-$$('#tabs button').forEach(b => b.onclick = () => show(b.dataset.view));
+$$('#tabs button').forEach(b => b.onclick = () => {
+  show(b.dataset.view);
+  b.dataset.view === 'ask' ? face.show() : face.hide();
+});
 $('#a-face').onclick = () => face.show();
 $('#face-x').onclick = () => face.hide();
 $('#v-add').onclick = () => requireVault(() => sheetAddDoc()) && sheetAddDoc();
@@ -2502,6 +2631,7 @@ $('#a-voice').onclick = () => {
   $('#f-faceauto').onchange = e => {
     face.auto = e.target.checked;
     localStorage.setItem('pa.face', e.target.checked ? 'on' : 'off');
+    prefs.save();
   };
   if ($('#f-open')) $('#f-open').onclick = () => sheetUnlock();
   if ($('#f-lock')) $('#f-lock').onclick = () => { closeSheet(); relock(); };
@@ -2553,6 +2683,7 @@ $('#a-voice').onclick = () => {
 
 /* ---------------------------------------------------------------- gate */
 $('#g-signin').onclick = async () => {
+  primeAudio();
   const btn = $('#g-signin');
   btn.disabled = true; btn.textContent = 'One moment…';
   try {
@@ -2568,7 +2699,8 @@ async function toUnlock(){
   $('#gate').hidden = true;
   $('#app').hidden = false;
   renderAll();
-  show('brief');
+  show('ask');
+  face.show();
   loadContext();
   if ('Notification' in window && Notification.permission === 'default')
     Notification.requestPermission();
