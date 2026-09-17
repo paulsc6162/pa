@@ -179,6 +179,15 @@ section[hidden]{display:none}
   background:rgba(5,6,10,.7)
 }
 
+#tap-hear{
+  position:fixed;left:50%;transform:translateX(-50%);z-index:16;
+  bottom:calc(120px + env(safe-area-inset-bottom));
+  background:var(--brass);color:#20180a;font-weight:600;
+  padding:.65rem 1.3rem;border-radius:11px;font-size:.92rem;
+  box-shadow:0 6px 24px rgba(0,0,0,.55)
+}
+#tap-hear[hidden]{display:none}
+
 #wake-dot{
   position:fixed;top:calc(.5rem + env(safe-area-inset-top));right:.9rem;z-index:15;
   font-size:.7rem;color:var(--brass);background:rgba(18,22,31,.85);
@@ -275,6 +284,7 @@ section[hidden]{display:none}
   <button id="face-x" aria-label="Hide the face">Hide</button>
 </div>
 <div id="toast"></div>
+<button id="tap-hear" hidden>Tap to hear me, sir</button>
 <div id="wake-dot" hidden></div>
 <button id="wake-bar" hidden>Tap to start listening again</button>
 
@@ -522,7 +532,8 @@ function primeAudio(){
   try {
     speechSynthesis.resume();
     const u = new SpeechSynthesisUtterance('.');
-    u.volume = 0.01; u.rate = 10;
+    u.volume = 0.05; u.rate = 2;      // rate above 2 is rejected outright on iOS
+    u.onend = () => { voice.unlocked = true; };
     speechSynthesis.speak(u);
   } catch {}
   audio.src = 'data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tAwAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAADAAABgAAqKioqKioqKioqKioqKioqKlVVVVVVVVVVVVVVVVVVVVWAgICAgICAgICAgICAgICAqqqqqqqqqqqqqqqqqqqqqtXV1dXV1dXV1dXV1dXV1dX//////////////////////wAAAABMYXZjNTguMTMAAAAAAAAAAAAAAAAkAAAAAAAAAAABgJAV4H4AAAAAAAAAAAAAAAAAAAD/+0DEAAPAAAGkAAAAIAAANIAAAARMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU=';
@@ -532,6 +543,7 @@ document.addEventListener('touchstart', primeAudio, {once: true});
 document.addEventListener('click', primeAudio, {once: true});
 
 const voice = {
+  unlocked: false,
   list: [], chosen: localStorage.getItem('pa.voice') || '',
   remote: localStorage.getItem('pa.remote') === 'on',
 
@@ -560,7 +572,7 @@ const voice = {
         if (v) u.voice = v;
         u.rate = 0.96; u.pitch = 0.92;   // a shade slower and lower: more measured
         u.volume = 1;
-        u.onstart = () => face.startTalk(line);
+        u.onstart = () => { voice.unlocked = true; hideTapToHear(); face.startTalk(line); };
         u.onend = u.onerror = () => face.stopTalk();
         speechSynthesis.speak(u);
 
@@ -676,7 +688,29 @@ let spokenBrief = false;
 function speakBriefOnce(){
   if (spokenBrief) return;
   spokenBrief = true;
-  voice.speak(briefSentence(5));
+  const line = briefSentence(5);
+  voice.speak(line);
+  // iOS sometimes refuses the first utterance of a session outright. If
+  // nothing started, ask for the one tap that unlocks it for good.
+  setTimeout(() => {
+    if (!voice.unlocked && !speechSynthesis.speaking) tapToHear(line);
+  }, 900);
+}
+
+function hideTapToHear(){
+  const b = $('#tap-hear');
+  if (b) b.hidden = true;
+}
+
+function tapToHear(line){
+  const b = $('#tap-hear');
+  if (!b) return;
+  b.hidden = false;
+  b.onclick = () => {
+    b.hidden = true;
+    voice.unlocked = true;
+    voice.speak(line);
+  };
 }
 
 const WX = {0:'clear',1:'mostly clear',2:'some cloud',3:'overcast',45:'fog',48:'freezing fog',
@@ -1095,17 +1129,148 @@ async function sheetViewEvent(id){
   };
 }
 
+/* ------------------------------------------------------------- vcards */
+/* Safari cannot reach the phone's address book — there is no API for it.
+   What it can do is read a vCard file, which is how iOS exports contacts.
+   Everything is parsed and encrypted here; the file never leaves the phone. */
+const vcard = {
+  /* Folded lines continue on the next line starting with a space or tab. */
+  unfold(text){
+    return text.replace(/\r\n/g, '\n').replace(/\n[ \t]/g, '');
+  },
+
+  decode(v, params){
+    if (/quoted-printable/i.test(params)){
+      v = v.replace(/=\n/g, '')
+           .replace(/=([0-9A-F]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+      try { v = decodeURIComponent(escape(v)); } catch {}
+    }
+    return v.replace(/\\,/g, ',').replace(/\\;/g, ';').replace(/\\n/gi, ' ').trim();
+  },
+
+  /* BDAY comes as 19800114, 1980-01-14, or --0114 with the year withheld. */
+  birthday(raw){
+    const v = raw.replace(/[^0-9-]/g, '');
+    let m = v.match(/^(\d{4})-?(\d{2})-?(\d{2})$/);
+    if (m) return m[1] + '-' + m[2] + '-' + m[3];
+    m = v.match(/^--?-?(\d{2})-?(\d{2})$/);
+    if (m) return '1900-' + m[1] + '-' + m[2];      // year unknown
+    return null;
+  },
+
+  parse(text){
+    const out = [];
+    const blocks = this.unfold(text).split(/BEGIN:VCARD/i).slice(1);
+
+    for (const block of blocks){
+      const c = {name:'', phone:'', email:'', relationship:'', birthday:null};
+      let bestPhone = 0;
+
+      for (const line of block.split('\n')){
+        const at = line.indexOf(':');
+        if (at < 1) continue;
+        const left = line.slice(0, at);
+        const val = this.decode(line.slice(at + 1), left);
+        if (!val) continue;
+        const prop = left.split(';')[0].replace(/^item\d+\./i, '').toUpperCase();
+        const params = left.toUpperCase();
+
+        if (prop === 'FN') c.name = val;
+        else if (prop === 'N' && !c.name){
+          const p = val.split(';');
+          c.name = ((p[1] || '') + ' ' + (p[0] || '')).trim();
+        }
+        else if (prop === 'TEL'){
+          // prefer mobile, then a preferred number, then anything
+          const rank = /CELL|MOBILE|IPHONE/.test(params) ? 3
+                     : /PREF/.test(params) ? 2 : 1;
+          if (rank > bestPhone){ bestPhone = rank; c.phone = val.replace(/[^\d+]/g, ''); }
+        }
+        else if (prop === 'EMAIL' && !c.email) c.email = val;
+        else if (prop === 'ORG' && !c.relationship) c.relationship = val.split(';')[0];
+        else if (prop === 'TITLE' && !c.relationship) c.relationship = val;
+        else if (prop === 'BDAY') c.birthday = this.birthday(val);
+      }
+
+      if (c.name && (c.phone || c.email)) out.push(c);
+    }
+    return out;
+  },
+
+  async importFile(file, onProgress){
+    const text = await file.text();
+    const found = this.parse(text);
+    if (!found.length) return {added:0, skipped:0, found:0};
+
+    const have = new Set(S.contacts.map(c => (c._.name || '').toLowerCase().trim()));
+    let added = 0, skipped = 0, n = 0;
+
+    for (const c of found){
+      n++;
+      if (onProgress) onProgress(n, found.length);
+      if (have.has(c.name.toLowerCase().trim())){ skipped++; continue; }
+      try {
+        await db.insert('pa_contacts', {
+          owner_tag: 'personal',
+          birthday: c.birthday,
+          payload_enc: await encJSON({
+            name: c.name, phone: c.phone, email: c.email,
+            relationship: c.relationship
+          })
+        });
+        // a real birthday earns a yearly reminder; a withheld year does not
+        if (c.birthday && !c.birthday.startsWith('1900')){
+          await db.insert('pa_events', {
+            kind:'birthday', owner_tag:'personal',
+            starts_at: new Date(c.birthday + 'T09:00:00').toISOString(),
+            all_day:true, important:true, recurs:'yearly',
+            alerts:[{minutes_before:1440}],
+            payload_enc: await encJSON({title: c.name + "'s birthday", notes:''})
+          });
+        }
+        added++;
+        have.add(c.name.toLowerCase().trim());
+      } catch { skipped++; }
+    }
+    return {added, skipped, found: found.length};
+  }
+};
+
 /* ------------------------------------------------- contacts and money */
 function sheetAddPerson(){
   openSheet(
     '<h2>Add</h2>' +
-    '<label for="f-what">Contact or subscription</label><select id="f-what">' +
+    '<label for="f-vcf">Import contacts from a vCard</label>' +
+    '<input id="f-vcf" type="file" accept=".vcf,text/vcard,text/x-vcard">' +
+    '<p class="small muted" id="f-vcf-note">Export from iCloud.com, Contacts, ' +
+      'select all, then the gear, Export vCard. Read and encrypted on this phone.</p>' +
+    '<div style="height:1.2rem"></div>' +
+    '<label for="f-what">Or add one by hand</label><select id="f-what">' +
       '<option value="contact">Contact</option><option value="sub">Subscription</option></select>' +
     '<div id="f-fields"></div>' +
     '<div style="height:1.2rem"></div>' +
     '<button class="btn" id="f-save">Save</button>' +
     '<div style="height:.6rem"></div>' +
     '<button class="btn ghost" onclick="closeSheet()">Cancel</button>');
+
+  $('#f-vcf').onchange = async e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const note = $('#f-vcf-note');
+    note.textContent = 'Reading…';
+    try {
+      const r = await vcard.importFile(file, (n, total) => {
+        note.textContent = 'Filing ' + n + ' of ' + total + '…';
+      });
+      await loadAll(); renderAll();
+      note.textContent = r.found
+        ? r.added + ' added' + (r.skipped ? ', ' + r.skipped + ' already known' : '') + '.'
+        : 'No contacts found in that file, sir.';
+      if (r.added) toast(r.added + ' contacts filed, sir.');
+    } catch (err){
+      note.textContent = 'That file would not read, sir.';
+    }
+  };
 
   const draw = () => {
     const isCon = $('#f-what').value === 'contact';
