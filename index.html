@@ -1482,7 +1482,11 @@ async function askModel(q){
       })
     });
     lastReading = null;
-    if (!r.ok) throw new Error('endpoint');
+    if (!r.ok){
+      let why = '';
+      try { const j = await r.json(); why = (j.detail || '').slice(0, 180); } catch {}
+      throw new Error(why || ('HTTP ' + r.status));
+    }
     const j = await r.json();
     thinking(false);
     if (!j.answer) throw new Error('empty');
@@ -1492,10 +1496,11 @@ async function askModel(q){
     say(esc(answer), answer);
     if (!locked()) mem.record(q, answer);   // deliberately not awaited
     return;
-  } catch {
+  } catch (e){
     thinking(false);
     say('I am afraid I cannot reach my wits at the moment, sir. ' +
         'Either the connection is down or the key needs looking at.');
+    if (e && e.message) toast(String(e.message).slice(0, 90));
   }
 }
 
