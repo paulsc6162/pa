@@ -158,7 +158,7 @@ section[hidden]{display:none}
 <div id="gate">
   <div class="keyhole"></div>
   <h1>PA</h1>
-  <p class="lede" id="gate-lede">Sign in, then unlock the vault.</p>
+  <p class="lede" id="gate-lede">Sign in, sir, then we shall open the vault.</p>
 
   <div id="step-signin">
     <label for="g-email">Email</label>
@@ -172,7 +172,7 @@ section[hidden]{display:none}
   <div id="step-unlock" hidden>
     <label for="g-pass">Vault passphrase</label>
     <input id="g-pass" type="password" autocomplete="off">
-    <p class="small muted" id="g-hint">This never leaves the phone. Nobody can recover it for you.</p>
+    <p class="small muted" id="g-hint">This never leaves the phone. Not even I can recover it for you.</p>
     <div style="height:.6rem"></div>
     <button class="btn" id="g-unlock">Unlock</button>
     <div style="height:.6rem"></div>
@@ -211,7 +211,7 @@ section[hidden]{display:none}
   </section>
 
   <section id="view-ask" hidden>
-    <div class="head"><h2>Ask</h2><button class="chip" id="a-voice">Voice</button></div>
+    <div class="head"><h2>Ask</h2><span style="display:flex;gap:.5rem;flex:0 0 auto"><button class="chip" id="a-mem">Memory</button><button class="chip" id="a-voice">Voice</button></span></div>
     <div id="a-thread"></div>
     <div style="height:4rem"></div>
   </section>
@@ -219,7 +219,7 @@ section[hidden]{display:none}
 </main>
 
 <div class="askbar" id="askbar" hidden>
-  <input id="a-input" placeholder="What's on today?" enterkeyhint="send">
+  <input id="a-input" placeholder="Anything I should know, sir?" enterkeyhint="send">
   <button class="mic" id="a-mic" aria-label="Speak">🎙</button>
 </div>
 
@@ -251,7 +251,9 @@ const CFG = {
   url:  'https://glimkvmtqdldbinumzwg.supabase.co',
   anon: 'sb_publishable_5NPBxxfv9duXIEcsnqGJ9g_aIuel95-',
   // --------------------------------------------------------------------
-  askEndpoint: '/.netlify/functions/ask',   // web fallback, see README
+  askEndpoint: '/.netlify/functions/ask',     // persona + web search
+  speakEndpoint: '/.netlify/functions/speak', // ElevenLabs, falls back on-device
+  rememberEndpoint: '/.netlify/functions/remember', // what it learns about you
   kdfIters: 600000
 };
 
@@ -310,7 +312,7 @@ async function signIn(email, password){
     headers:{'apikey':CFG.anon,'Content-Type':'application/json'},
     body: JSON.stringify({email, password})
   });
-  if (!r.ok) throw new Error('Email or password not recognised.');
+  if (!r.ok) throw new Error('That combination means nothing to me, sir.');
   const j = await r.json();
   j.expires_at = Date.now() + (j.expires_in - 60) * 1000;
   S.session = j; store.s = j;
@@ -419,7 +421,7 @@ async function openVault(pass){
   S.key = await deriveKey(pass, meta.kdf_salt, meta.kdf_iters || CFG.kdfIters);
   try {
     if (await decStr(meta.verifier) !== 'pa-vault-ok') throw 0;
-  } catch { S.key = null; throw new Error('That passphrase does not match this vault.'); }
+  } catch { S.key = null; throw new Error('That is not the passphrase, sir.'); }
   return false;
 }
 
@@ -468,22 +470,65 @@ function parseMRZ(raw){
 }
 
 /* -------------------------------------------------------------- voice */
+/* ElevenLabs where it can, the on-device voice when it can't. iOS refuses
+   to play audio until the user has touched the page once, so the first
+   gesture primes a silent buffer and everything after that just works. */
+const audio = new Audio();
+let audioPrimed = false;
+function primeAudio(){
+  if (audioPrimed) return;
+  audioPrimed = true;
+  audio.src = 'data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tAwAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAADAAABgAAqKioqKioqKioqKioqKioqKlVVVVVVVVVVVVVVVVVVVVWAgICAgICAgICAgICAgICAqqqqqqqqqqqqqqqqqqqqqtXV1dXV1dXV1dXV1dXV1dX//////////////////////wAAAABMYXZjNTguMTMAAAAAAAAAAAAAAAAkAAAAAAAAAAABgJAV4H4AAAAAAAAAAAAAAAAAAAD/+0DEAAPAAAGkAAAAIAAANIAAAARMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU=';
+  audio.play().catch(() => {});
+}
+document.addEventListener('touchstart', primeAudio, {once: true});
+document.addEventListener('click', primeAudio, {once: true});
+
 const voice = {
   list: [], chosen: localStorage.getItem('pa.voice') || '',
+  remote: localStorage.getItem('pa.remote') === 'on',
+
   load(){
     this.list = speechSynthesis.getVoices().filter(v => v.lang.startsWith('en'));
-    if (!this.chosen && this.list.length) this.chosen = this.list[0].name;
+    if (!this.chosen){
+      const daniel = this.list.find(v => /daniel/i.test(v.name));
+      this.chosen = daniel ? daniel.name : (this.list[0] || {}).name || '';
+    }
   },
-  speak(text){
+
+  local(text){
     if (!('speechSynthesis' in window)) return;
     speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(String(text).replace(/\s+/g,' ').trim());
+    const u = new SpeechSynthesisUtterance(String(text).replace(/\s+/g, ' ').trim());
     const v = this.list.find(x => x.name === this.chosen);
     if (v) u.voice = v;
-    u.rate = 1; u.pitch = 1;
+    u.rate = 0.96; u.pitch = 0.92;      // a shade slower and lower: more measured
     speechSynthesis.speak(u);
   },
-  set(name){ this.chosen = name; localStorage.setItem('pa.voice', name); }
+
+  async speak(text){
+    const line = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!line) return;
+    if (!this.remote) return this.local(line);
+    try {
+      const r = await fetch(CFG.speakEndpoint, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: line})
+      });
+      if (!r.ok) throw new Error('tts');
+      const url = URL.createObjectURL(await r.blob());
+      speechSynthesis.cancel();
+      audio.src = url;
+      audio.onended = () => URL.revokeObjectURL(url);
+      await audio.play();
+    } catch {
+      this.local(line);                 // network down, no key, quota gone
+    }
+  },
+
+  set(name){ this.chosen = name; localStorage.setItem('pa.voice', name); },
+  setRemote(on){ this.remote = on; localStorage.setItem('pa.remote', on ? 'on' : 'off'); }
 };
 if ('speechSynthesis' in window){
   voice.load();
@@ -493,16 +538,24 @@ if ('speechSynthesis' in window){
 const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
 let rec = null;
 function listen(onText){
-  if (!Rec){ toast('This browser will not do speech input. Type instead.'); return; }
+  if (!Rec){ toast('This browser will not take dictation, sir. Typing it is.'); return; }
   const btn = $('#a-mic');
-  if (rec){ rec.stop(); rec = null; btn.classList.remove('on'); return; }
+  if (rec){ rec.stop(); rec = null; prosody.stop(0); btn.classList.remove('on'); return; }
+
   rec = new Rec();
   rec.lang = 'en-GB'; rec.interimResults = false; rec.maxAlternatives = 1;
-  rec.onresult = e => onText(e.results[0][0].transcript);
-  rec.onend = () => { rec = null; btn.classList.remove('on'); };
-  rec.onerror = () => { toast('Did not catch that.'); };
+
+  rec.onresult = e => {
+    const text = e.results[0][0].transcript;
+    lastReading = prosody.stop(text.trim().split(/\s+/).length);
+    onText(text);
+  };
+  rec.onend = () => { rec = null; prosody.stop(0); btn.classList.remove('on'); };
+  rec.onerror = () => { prosody.stop(0); toast('I did not catch that, sir.'); };
+
   btn.classList.add('on');
-  rec.start();
+  // If the mic is busy or refused, dictation still works — just without the reading.
+  prosody.start().finally(() => { try { rec && rec.start(); } catch {} });
 }
 
 /* ---------------------------------------------------------- load data */
@@ -540,8 +593,16 @@ async function loadContext(){
         '&forecast_days=6&timezone=auto';
       S.weather = await fetch(u).then(r => r.json());
       renderBrief();
+      speakBriefOnce();
     } catch {}
   }, () => {}, {maximumAge: 1800000, timeout: 8000});
+}
+
+let spokenBrief = false;
+function speakBriefOnce(){
+  if (spokenBrief) return;
+  spokenBrief = true;
+  voice.speak(briefSentence(5));
 }
 
 const WX = {0:'clear',1:'mostly clear',2:'some cloud',3:'overcast',45:'fog',48:'freezing fog',
@@ -649,7 +710,7 @@ function renderBrief(){
 
   $('#b-today').innerHTML = today.length
     ? '<div class="group">On today</div>' + today.map(itemRow).join('')
-    : '<div class="empty">Nothing booked today.</div>';
+    : '<div class="empty">Nothing booked today, sir.</div>';
   $('#b-ahead').innerHTML = ahead.length
     ? '<div class="group">Next five days</div>' + ahead.map(itemRow).join('')
     : '';
@@ -658,7 +719,7 @@ function renderBrief(){
 function renderVault(){
   if (!S.docs.length){
     $('#v-list').innerHTML =
-      '<div class="empty">Nothing stored yet. Add a passport, licence or contract.</div>';
+      '<div class="empty">The vault is empty, sir. A passport or a licence would be a sensible start.</div>';
     return;
   }
   const groups = {personal: [], business: []};
@@ -686,7 +747,7 @@ function renderCal(){
         (e.owner_tag === 'business' ? '<span class="chip biz">business</span>' : '') +
         '</span><span class="when">' +
         (e.starts_at ? prettyWhen(e.starts_at, e.all_day) : '') + '</span></button>').join('')
-    : '<div class="empty">No notes, appointments or reminders yet.</div>';
+    : '<div class="empty">The diary is bare, sir.</div>';
 }
 
 function renderPeople(){
@@ -707,7 +768,7 @@ function renderPeople(){
     '</span></button>').join('');
 
   $('#p-list').innerHTML =
-    (c ? '<div class="group">Contacts</div>' + c : '<div class="empty">No contacts yet.</div>') +
+    (c ? '<div class="group">Contacts</div>' + c : '<div class="empty">Nobody logged yet, sir.</div>') +
     (s ? '<div class="group">Subscriptions</div>' + s : '');
 }
 
@@ -775,8 +836,8 @@ function sheetAddDoc(prefill){
   $('#f-save').addEventListener('click', async () => {
     const btn = $('#f-save');
     const label = $('#f-label').value.trim();
-    if (!label){ toast('Give it a name first.'); return; }
-    btn.disabled = true; btn.textContent = 'Encrypting…';
+    if (!label){ toast('It will want a name, sir.'); return; }
+    btn.disabled = true; btn.textContent = 'Encrypting, sir…';
     try {
       let image_enc = null, has_image = false;
       const file = $('#f-photo').files[0];
@@ -800,10 +861,10 @@ function sheetAddDoc(prefill){
       };
       await db.insert('pa_documents', row);
       await loadAll(); renderAll(); closeSheet();
-      toast('Saved and encrypted.');
+      toast('Filed and locked, sir.');
     } catch (err){
       btn.disabled = false; btn.textContent = 'Save document';
-      toast('Could not save. ' + String(err.message || err).slice(0, 70));
+      toast('That did not take, sir. ' + String(err.message || err).slice(0, 70));
     }
   });
 }
@@ -825,7 +886,7 @@ async function sheetViewDoc(id){
     '<div style="height:1rem"></div>' +
     '<button class="btn" id="d-renew">Mark renewed</button>' +
     '<div style="height:.6rem"></div>' +
-    '<button class="btn ghost" id="d-read">Read this out</button>' +
+    '<button class="btn ghost" id="d-read">Read it to me</button>' +
     '<div style="height:.6rem"></div>' +
     '<button class="btn danger" id="d-del">Delete permanently</button>' +
     '<div style="height:.6rem"></div>' +
@@ -836,7 +897,7 @@ async function sheetViewDoc(id){
       const b64img = await decStr(d.image_enc);
       $('#d-img').innerHTML = '<img class="docimg" alt="' +
         esc(d._.label || 'document') + '" src="data:image/jpeg;base64,' + b64img + '">';
-    } catch { $('#d-img').innerHTML = '<p class="muted small">That photo would not decrypt.</p>'; }
+    } catch { $('#d-img').innerHTML = '<p class="muted small">That photograph refuses to decrypt, sir.</p>'; }
   }
 
   $('#d-read').onclick = () => {
@@ -853,14 +914,14 @@ async function sheetViewDoc(id){
     await loadAll();
     closeSheet();
     sheetAddDoc({label: d._.label, doc_type: d.doc_type, owner_tag: d.owner_tag});
-    toast('Old one archived. Take a photo of the new one.');
+    toast('The old one is filed away. A photograph of the new one, when you have a moment.');
   };
 
   $('#d-del').onclick = async () => {
-    if (!confirm('Delete this and its photo for good?')) return;
+    if (!confirm('Delete this and its photograph for good? There is no undoing it.')) return;
     await db.remove('pa_documents', d.id);
     await loadAll(); renderAll(); closeSheet();
-    toast('Deleted.');
+    toast('Gone, sir.');
   };
 }
 
@@ -897,7 +958,7 @@ function sheetAddEvent(prefill){
 
   $('#f-save').onclick = async () => {
     const title = $('#f-title').value.trim();
-    if (!title){ toast('Needs a title.'); return; }
+    if (!title){ toast('A title, sir, if you would.'); return; }
     const alert = $('#f-alert').value;
     await db.insert('pa_events', {
       kind: $('#f-kind').value,
@@ -911,7 +972,7 @@ function sheetAddEvent(prefill){
     });
     await loadAll(); renderAll(); closeSheet();
     scheduleAlerts();
-    toast('Added.');
+    toast('Noted, sir.');
   };
 }
 
@@ -937,17 +998,17 @@ async function sheetViewEvent(id){
       if (e.recurs === 'monthly') next.setMonth(next.getMonth() + 1);
       if (e.recurs === 'weekly')  next.setDate(next.getDate() + 7);
       await db.update('pa_events', e.id, {starts_at: next.toISOString()});
-      toast('Done. Moved to ' + prettyWhen(next.toISOString(), e.all_day) + '.');
+      toast('Marked done, sir. Moved to ' + prettyWhen(next.toISOString(), e.all_day) + '.');
     } else {
       await db.update('pa_events', e.id, {done: true});
-      toast('Done.');
+      toast('Marked done, sir.');
     }
     await loadAll(); renderAll(); closeSheet();
   };
   $('#e-del').onclick = async () => {
     await db.remove('pa_events', e.id);
     await loadAll(); renderAll(); closeSheet();
-    toast('Deleted.');
+    toast('Gone, sir.');
   };
 }
 
@@ -985,7 +1046,7 @@ function sheetAddPerson(){
 
   $('#f-save').onclick = async () => {
     const name = $('#f-name').value.trim();
-    if (!name){ toast('Needs a name.'); return; }
+    if (!name){ toast('A name first, sir.'); return; }
     if ($('#f-what').value === 'contact'){
       await db.insert('pa_contacts', {
         owner_tag: $('#f-owner').value,
@@ -1013,55 +1074,337 @@ function sheetAddPerson(){
       });
     }
     await loadAll(); renderAll(); closeSheet();
-    toast('Added.');
+    toast('Noted, sir.');
   };
 }
+
+/* ------------------------------------------------------------- memory */
+/* What it has learned about you. Encrypted at rest like everything else,
+   decrypted here, sent to the model as plain notes. You can read and
+   delete every line of it from Ask, Memory. */
+const mem = {
+  items: [],
+
+  async load(){
+    const rows = await db.select('pa_memory',
+      `user_id=eq.${uid()}&retired=eq.false&select=*` +
+      `&order=weight.desc,last_seen.desc&limit=150`);
+    for (const r of rows) r._ = await decJSON(r.payload_enc);
+    this.items = rows.filter(r => r._ && r._.text);
+  },
+
+  /* Persona notes always travel; facts by weight and recency. */
+  forModel(){
+    const persona = this.items.filter(m => m.kind === 'persona').slice(0, 10);
+    const rest    = this.items.filter(m => m.kind !== 'persona').slice(0, 45);
+    return [...persona, ...rest].map(m => ({kind: m.kind, text: m._.text}));
+  },
+
+  norm: t => t.toLowerCase().replace(/[^a-z0-9 ]/g, '').split(/\s+/).filter(Boolean),
+
+  /* Cheap overlap check so the same fact doesn't pile up twenty times. */
+  similar(a, b){
+    const A = new Set(this.norm(a)), B = this.norm(b);
+    if (!A.size || !B.length) return 0;
+    return B.filter(w => A.has(w)).length / Math.max(A.size, B.length);
+  },
+
+  async record(userText, paText){
+    try {
+      const r = await fetch(CFG.rememberEndpoint, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          exchange: `Paul: ${userText}\n\nPA: ${paText}`
+        })
+      });
+      if (!r.ok) return;
+      const {memories} = await r.json();
+      if (!memories || !memories.length) return;
+
+      for (const m of memories){
+        const hit = this.items.find(x => this.similar(x._.text, m.text) > 0.65);
+        if (hit){
+          await db.update('pa_memory', hit.id, {
+            times_seen: hit.times_seen + 1,
+            last_seen: new Date().toISOString(),
+            weight: Math.min(3, Math.max(hit.weight, m.weight))
+          });
+        } else {
+          await db.insert('pa_memory', {
+            kind: m.kind, weight: m.weight,
+            payload_enc: await encJSON({text: m.text})
+          });
+        }
+      }
+      await this.load();
+      await this.prune();
+    } catch { /* memory is a luxury; never let it break a reply */ }
+  },
+
+  async prune(){
+    if (this.items.length <= 250) return;
+    const doomed = [...this.items]
+      .sort((a, b) => a.weight - b.weight ||
+        new Date(a.last_seen) - new Date(b.last_seen))
+      .slice(0, this.items.length - 250);
+    for (const d of doomed) await db.update('pa_memory', d.id, {retired: true});
+    await this.load();
+  },
+
+  async forget(id){
+    await db.remove('pa_memory', id);
+    await this.load();
+  },
+
+  async forgetAll(){
+    await api(`pa_memory?user_id=eq.${uid()}`, {method: 'DELETE'});
+    this.items = [];
+  }
+};
+
+/* ------------------------------------------------------------ prosody */
+/* Not hearing. A reading of how you sounded, measured on this phone and
+   never sent as audio — pace, volume, pitch range, hesitation, each
+   judged against your own usual rather than some absolute. */
+const prosody = {
+  stream: null, ctx: null, frames: [], t0: 0, running: false,
+
+  base: JSON.parse(localStorage.getItem('pa.vocal') || '{"rms":[],"range":[],"wpm":[]}'),
+
+  saveBase(){ localStorage.setItem('pa.vocal', JSON.stringify(this.base)); },
+
+  push(key, v){
+    const a = this.base[key];
+    a.push(v);
+    if (a.length > 25) a.shift();
+  },
+
+  band(key, v){
+    const a = this.base[key];
+    if (a.length < 5 || !isFinite(v)) return null;      // not enough to judge yet
+    const sorted = [...a].sort((x, y) => x - y);
+    const med = sorted[Math.floor(sorted.length / 2)];
+    if (!med) return null;
+    const r = v / med;
+    return r < 0.75 ? 'lower than usual'
+         : r > 1.3  ? 'higher than usual'
+         : 'about usual';
+  },
+
+  async start(){
+    try {
+      this.stream = await navigator.mediaDevices.getUserMedia({audio: true});
+      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const src = this.ctx.createMediaStreamSource(this.stream);
+      const an = this.ctx.createAnalyser();
+      an.fftSize = 2048;
+      src.connect(an);
+      const buf = new Float32Array(an.fftSize);
+      this.frames = []; this.t0 = Date.now(); this.running = true;
+
+      const tick = () => {
+        if (!this.running) return;
+        an.getFloatTimeDomainData(buf);
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+        const rms = Math.sqrt(sum / buf.length);
+        this.frames.push({rms, hz: rms > 0.012 ? this.pitch(buf, this.ctx.sampleRate) : 0});
+        setTimeout(tick, 80);
+      };
+      tick();
+      return true;
+    } catch { this.running = false; return false; }
+  },
+
+  /* Autocorrelation. Rough, cheap, good enough for a range. */
+  pitch(buf, rate){
+    const n = buf.length;
+    let best = -1, bestCorr = 0;
+    for (let lag = 32; lag < 512; lag++){
+      let c = 0;
+      for (let i = 0; i < n - lag; i++) c += buf[i] * buf[i + lag];
+      if (c > bestCorr){ bestCorr = c; best = lag; }
+    }
+    const hz = best > 0 ? rate / best : 0;
+    return (hz > 60 && hz < 400) ? hz : 0;
+  },
+
+  stop(words){
+    this.running = false;
+    if (this.stream) this.stream.getTracks().forEach(t => t.stop());
+    if (this.ctx) this.ctx.close().catch(() => {});
+    this.stream = this.ctx = null;
+
+    const f = this.frames;
+    if (f.length < 8) return null;
+
+    const secs = (Date.now() - this.t0) / 1000;
+    const voiced = f.filter(x => x.rms > 0.012);
+    if (voiced.length < 5) return null;
+
+    const rms = voiced.reduce((s, x) => s + x.rms, 0) / voiced.length;
+    const hzs = f.map(x => x.hz).filter(Boolean).sort((a, b) => a - b);
+    const range = hzs.length > 4
+      ? hzs[Math.floor(hzs.length * 0.9)] - hzs[Math.floor(hzs.length * 0.1)] : NaN;
+    const wpm = words && secs > 0.5 ? (words / secs) * 60 : NaN;
+    const silence = 1 - (voiced.length / f.length);
+
+    const reading = {
+      seconds: +secs.toFixed(1),
+      volume: this.band('rms', rms),
+      pace: this.band('wpm', wpm),
+      pitch_range: this.band('range', range),
+      hesitation: silence > 0.45 ? 'a lot of pausing'
+                : silence > 0.28 ? 'some pausing' : 'fluent'
+    };
+
+    this.push('rms', rms);
+    if (isFinite(range)) this.push('range', range);
+    if (isFinite(wpm)) this.push('wpm', wpm);
+    this.saveBase();
+
+    // Nothing useful to say until there's a baseline to compare against.
+    return (reading.volume || reading.pace || reading.pitch_range) ? reading : null;
+  }
+};
 
 /* ---------------------------------------------------------------- ask */
 function say(html, spoken){
   const t = $('#a-thread');
   t.insertAdjacentHTML('beforeend', '<div class="bubble pa">' + html + '</div>');
   t.lastElementChild.scrollIntoView({block: 'end'});
-  voice.speak(spoken || t.lastElementChild.textContent);
+  const line = spoken || t.lastElementChild.textContent;
+  voice.speak(line);
+  chat.push({role: 'assistant', content: line});
 }
 function heard(text){
   $('#a-thread').insertAdjacentHTML('beforeend',
     '<div class="bubble me">' + esc(text) + '</div>');
+  $('#a-thread').lastElementChild.scrollIntoView({block: 'end'});
+  chat.push({role: 'user', content: text});
+}
+function thinking(on){
+  const t = $('#a-thread');
+  if (on){
+    t.insertAdjacentHTML('beforeend',
+      '<div class="bubble pa" id="a-wait"><span class="muted">One moment, sir…</span></div>');
+    t.lastElementChild.scrollIntoView({block: 'end'});
+  } else {
+    const w = $('#a-wait');
+    if (w) w.remove();
+  }
 }
 
+/* Conversation memory for the model. Trimmed, never persisted. */
+let chat = [];
+let lastReading = null;   // set by the mic, cleared after one use
+
+/* A few things are answered here rather than by the model: they must be
+   instant, correct, and work with no signal. The wording carries the
+   character so the seam doesn't show. */
+const pick = a => a[Math.floor(Math.random() * a.length)];
+
+const OPENERS = {
+  clear: ['Nothing in the diary, sir.', 'Your day is mercifully empty.',
+          'Not a thing booked. Enjoy it while it lasts.'],
+  busy:  ['Here is the damage, sir.', 'On today, sir:', 'Your day, such as it is:']
+};
+
 function briefSentence(days){
+  days = days || 5;
   const list = upcoming(days);
   const today = list.filter(o => o.days === 0);
   const ahead = list.filter(o => o.days > 0);
   const w = weatherLine(0);
-  let out = '';
+  const h = new Date().getHours();
+  let out = (h < 12 ? 'Good morning, sir. ' : h < 18 ? 'Good afternoon, sir. ' : 'Good evening, sir. ');
 
-  if (S.holiday) out += 'Today is a bank holiday, ' + S.holiday.title + '. ';
-  if (w) out += 'The forecast is ' + w.text + ', up to ' + w.hi + ' degrees' +
-    (w.rain >= 30 ? ', with a ' + w.rain + ' percent chance of rain' : '') + '. ';
+  if (S.holiday) out += 'It is a bank holiday, ' + S.holiday.title + '. ';
+  else if (S.nextHol && daysUntil(S.nextHol.date) <= 7)
+    out += S.nextHol.title + ' falls ' + relative(daysUntil(S.nextHol.date)) + '. ';
+
+  if (w){
+    out += 'Outside it is ' + w.text + ', topping out at ' + w.hi + ' degrees';
+    out += w.rain >= 60 ? '. I would take the coat. '
+         : w.rain >= 30 ? ', with a fair chance of rain. '
+         : '. ';
+  }
 
   out += today.length
-    ? 'On today: ' + today.map(o => o.title).join('; ') + '. '
-    : 'Nothing is booked for today. ';
+    ? pick(OPENERS.busy) + ' ' + today.map(o => o.title).join('; ') + '. '
+    : pick(OPENERS.clear) + ' ';
 
   if (ahead.length)
-    out += 'Coming up: ' + ahead.map(o => o.title + ' ' + relative(o.days)).join('; ') + '.';
+    out += 'Looking ahead: ' + ahead.map(o => o.title + ' ' + relative(o.days)).join('; ') + '.';
 
-  return out;
+  return out.trim();
 }
 
-async function askWeb(q){
+/* Everything except images goes to the model, so it can actually hold a
+   conversation about your life rather than pattern-matching at you. */
+function buildContext(){
+  const fmt = d => d ? prettyDate(d, {day:'numeric', month:'long', year:'numeric'}) : null;
+  return {
+    today: new Date().toLocaleDateString('en-GB',
+      {weekday:'long', day:'numeric', month:'long', year:'numeric'}),
+    bank_holiday: S.holiday ? S.holiday.title : null,
+    next_bank_holiday: S.nextHol ? {name: S.nextHol.title, date: fmt(S.nextHol.date)} : null,
+    weather_today: weatherLine(0),
+    diary: S.events.filter(e => !e.done).map(e => ({
+      what: e._.title, kind: e.kind, side: e.owner_tag,
+      when: e.starts_at ? prettyWhen(e.starts_at, e.all_day) : null,
+      repeats: e.recurs === 'none' ? null : e.recurs,
+      flagged_important: e.important || undefined,
+      notes: e._.notes || undefined
+    })),
+    vault: S.docs.map(d => ({
+      what: d._.label || d.doc_type, type: d.doc_type, side: d.owner_tag,
+      expires: fmt(d.expiry_date),
+      notice_deadline: fmt(d.notice_date),
+      days_left: d.expiry_date || d.notice_date ? docDue(d).days : null,
+      reference: d._.number || undefined,
+      notes: d._.notes || undefined,
+      photo_held: d.has_image
+    })),
+    contacts: S.contacts.map(c => ({
+      name: c._.name, relationship: c._.relationship || undefined,
+      phone: c._.phone || undefined, email: c._.email || undefined,
+      birthday: fmt(c.birthday)
+    })),
+    subscriptions: S.subs.map(s => ({
+      name: s._.name, amount_gbp: s._.amount || undefined,
+      billed: s.cycle, next_charge: fmt(s.next_charge), side: s.owner_tag
+    }))
+  };
+}
+
+async function askModel(q){
+  thinking(true);
   try {
     const r = await fetch(CFG.askEndpoint, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({question: q})
+      body: JSON.stringify({
+        question: q,
+        context: buildContext(),
+        history: chat.slice(-12, -1),
+        memory: mem.forModel(),
+        voice_reading: lastReading
+      })
     });
-    if (!r.ok) throw new Error('no endpoint');
+    lastReading = null;
+    if (!r.ok) throw new Error('endpoint');
     const j = await r.json();
-    return j.answer;
+    thinking(false);
+    if (!j.answer) throw new Error('empty');
+    say(esc(j.answer), j.answer);
+    mem.record(q, j.answer);        // deliberately not awaited
+    return;
   } catch {
-    return null;
+    thinking(false);
+    say('I am afraid I cannot reach my wits at the moment, sir. ' +
+        'Either the connection is down or the key needs looking at.');
   }
 }
 
@@ -1069,73 +1412,33 @@ async function ask(q){
   const t = q.toLowerCase().trim();
   heard(q);
 
-  if (/what.*(on|happening).*(today)|^today$|brief/.test(t))
-    return say(esc(briefSentence(5)).replace(/\. /g, '.<br>'), briefSentence(5));
-
-  if (/next (5|five) days|coming up|this week|ahead/.test(t)){
-    const a = upcoming(7).filter(o => o.days > 0);
-    const line = a.length
-      ? 'Over the next week: ' + a.map(o => o.title + ' ' + relative(o.days)).join('; ') + '.'
-      : 'Nothing in the next week.';
-    return say(esc(line), line);
+  // Instant, offline-safe, and the one thing you ask most often.
+  if (/^(what'?s?\s+)?(on\s+)?today\??$|what.*(on|happening).*today|brief|status report/.test(t)){
+    const line = briefSentence(5);
+    return say(esc(line).replace(/\. /g, '.<br>'), line);
   }
 
-  if (/weather|forecast|rain/.test(t)){
-    const w = weatherLine(0);
-    const line = w ? 'Today: ' + w.text + ', ' + w.lo + ' to ' + w.hi + ' degrees, ' +
-      w.rain + ' percent chance of rain.' : 'No forecast. Location is switched off.';
-    return say(esc(line), line);
-  }
-
-  if (/expire|expiry|renew|when does/.test(t)){
-    const hits = S.docs.filter(d => d.expiry_date || d.notice_date)
-      .filter(d => t.split(/\s+/).some(w => w.length > 3 &&
-        ((d._.label || '') + ' ' + d.doc_type).toLowerCase().includes(w)));
-    const set = hits.length ? hits : S.docs.filter(d => d.expiry_date);
-    if (!set.length) return say('Nothing in the vault has an expiry date on it yet.');
-    const line = set.map(d => {
-      const due = docDue(d);
-      return (d._.label || d.doc_type) + ' ' + (due.isNotice ? 'needs notice by ' : 'expires ') +
-        prettyDate(due.date, {day:'numeric', month:'long', year:'numeric'}) + ', ' + relative(due.days);
-    }).join('. ') + '.';
-    return say(esc(line), line);
-  }
-
-  if (/show (me )?(my )?/.test(t)){
-    const hit = S.docs.find(d => t.includes((d._.label || '').toLowerCase().split(' ')[0]) ||
-      t.includes(d.doc_type.replace(/_/g, ' ')));
+  // Pulling a document up on screen has to happen locally: the model
+  // never sees the images and cannot open anything.
+  if (/\b(show|open|pull up|display|find)\b/.test(t)){
+    const hit = S.docs.find(d => {
+      const hay = ((d._.label || '') + ' ' + d.doc_type.replace(/_/g, ' ')).toLowerCase();
+      return hay.split(/\s+/).some(w => w.length > 3 && t.includes(w));
+    });
     if (hit){
-      say('Opening ' + esc(hit._.label || hit.doc_type) + '.', 'Opening it now.');
+      say('Here you are, sir.', 'Here you are, sir.');
       return sheetViewDoc(hit.id);
     }
   }
 
-  if (/subscription|paying for|direct debit/.test(t)){
-    if (!S.subs.length) return say('No subscriptions logged yet.');
-    const monthly = S.subs.reduce((n, s) => n +
-      (+s._.amount || 0) * ({weekly:4.33, monthly:1, quarterly:1/3, yearly:1/12}[s.cycle] || 1), 0);
-    const line = S.subs.map(s => s._.name + ', £' + (s._.amount || '?') + ' ' + s.cycle).join('. ') +
-      '. That is about £' + monthly.toFixed(2) + ' a month.';
-    return say(esc(line), line);
+  // Adding something is a form, not a conversation.
+  if (/^(add|note|remind me|put in|book)\b/.test(t)){
+    const title = q.replace(/^(add|note|remind me to|remind me|put in|book)\s*/i, '').trim();
+    say('Very good, sir. I have it open.', 'Very good, sir.');
+    return sheetAddEvent({title: title, kind: /remind/.test(t) ? 'reminder' : 'appointment'});
   }
 
-  if (/birthday/.test(t)){
-    const b = upcoming(365).filter(o => o.kind === 'birthday').slice(0, 5);
-    const line = b.length ? b.map(o => o.title + ' ' + relative(o.days)).join('. ') + '.'
-                          : 'No birthdays saved.';
-    return say(esc(line), line);
-  }
-
-  if (/^(add|note|remind)/.test(t)){
-    const title = q.replace(/^(add|note|remind me to|remind me)\s*/i, '').trim();
-    say('Opening a new entry.', 'Opening a new entry.');
-    return sheetAddEvent({title: title, kind: /remind/.test(t) ? 'reminder' : 'note'});
-  }
-
-  const web = await askWeb(q);
-  if (web) return say(esc(web).replace(/\n/g, '<br>'), web);
-  say('I have nothing on that in the vault, and the web search is not connected yet. ' +
-      'See the README for the search function.');
+  return askModel(q);
 }
 
 /* ------------------------------------------------------------- alerts */
@@ -1193,24 +1496,76 @@ $('#a-input').addEventListener('keydown', e => {
 });
 $('#a-mic').onclick = () => listen(text => ask(text));
 
+$('#a-mem').onclick = () => {
+  const label = {fact:'Knows', preference:'How you like things',
+                 thread:'Live threads', persona:'How it talks to you'};
+  const order = ['persona','preference','fact','thread'];
+  let html = '<h2>What it has learned</h2>';
+
+  if (!mem.items.length){
+    html += '<p class="muted">Nothing yet, sir. It picks things up as you talk.</p>';
+  } else {
+    for (const k of order){
+      const set = mem.items.filter(m => m.kind === k);
+      if (!set.length) continue;
+      html += '<div class="group">' + label[k] + '</div>' + set.map(m =>
+        '<div class="item" style="border-left-color:' +
+          (m.weight === 3 ? 'var(--brass)' : 'var(--line)') + '">' +
+        '<span class="t">' + esc(m._.text) +
+        (m.times_seen > 1 ? '<span class="small muted">seen ' + m.times_seen + ' times</span>' : '') +
+        '</span><button class="chip" data-forget="' + m.id + '">Forget</button></div>').join('');
+    }
+  }
+
+  html += '<div style="height:1.2rem"></div>' +
+    '<button class="btn danger" id="m-wipe">Forget everything</button>' +
+    '<div style="height:.6rem"></div>' +
+    '<button class="btn ghost" onclick="closeSheet()">Close</button>';
+  openSheet(html);
+
+  $$('[data-forget]').forEach(b => b.onclick = async () => {
+    await mem.forget(b.dataset.forget);
+    toast('Forgotten, sir.');
+    $('#a-mem').onclick();
+  });
+
+  $('#m-wipe').onclick = async () => {
+    if (!confirm('Wipe everything it has learned about you? This cannot be undone.')) return;
+    await mem.forgetAll();
+    closeSheet();
+    toast('A clean slate, sir.');
+  };
+};
+
 $('#a-voice').onclick = () => {
   voice.load();
-  openSheet('<h2>Voice</h2><label for="f-voice">Which voice reads answers out</label>' +
+  openSheet('<h2>Voice</h2>' +
+    '<label><input type="checkbox" id="f-remote" style="width:auto;margin-right:.5rem"' +
+      (voice.remote ? ' checked' : '') + '>Use ElevenLabs (needs a paid key)</label>' +
+    '<p class="small muted">Off by default. Add the keys in Netlify, switch this ' +
+      'on, and it upgrades with no rebuild. Falls back on its own if the key ' +
+      'or the connection gives out.</p>' +
+    '<label for="f-voice">Voice</label>' +
     '<select id="f-voice">' + voice.list.map(v =>
       '<option value="' + esc(v.name) + '"' + (v.name === voice.chosen ? ' selected' : '') + '>' +
       esc(v.name) + ' (' + v.lang + ')</option>').join('') + '</select>' +
+    '<p class="small muted">On the iPhone, download Daniel (Premium) under Settings, ' +
+      'Accessibility, Spoken Content, Voices. The compact one is dreadful.</p>' +
     '<div style="height:.8rem"></div>' +
-    '<button class="btn ghost" id="f-try">Hear it</button>' +
+    '<button class="btn ghost" id="f-try">Let me hear it</button>' +
     '<div style="height:.6rem"></div>' +
     '<button class="btn" onclick="closeSheet()">Done</button>');
   $('#f-voice').onchange = e => voice.set(e.target.value);
-  $('#f-try').onclick = () => voice.speak(briefSentence(5) || 'This is how I will read things to you.');
+  $('#f-remote').onchange = e => voice.setRemote(e.target.checked);
+  $('#f-try').onclick = () => voice.speak(
+    'Good evening, sir. Two things want your attention, and one of them you have ' +
+    'been ignoring since Tuesday.');
 };
 
 /* ---------------------------------------------------------------- gate */
 $('#g-signin').onclick = async () => {
   const btn = $('#g-signin');
-  btn.disabled = true; btn.textContent = 'Signing in…';
+  btn.disabled = true; btn.textContent = 'One moment…';
   try {
     await signIn($('#g-email').value.trim(), $('#g-pw').value);
     toUnlock();
@@ -1223,7 +1578,7 @@ $('#g-signin').onclick = async () => {
 function toUnlock(){
   $('#step-signin').hidden = true;
   $('#step-unlock').hidden = false;
-  $('#gate-lede').textContent = 'Unlock the vault.';
+  $('#gate-lede').textContent = 'The vault, sir.';
   setTimeout(() => $('#g-pass').focus(), 100);
 }
 
@@ -1231,8 +1586,8 @@ $('#g-out').onclick = signOut;
 
 $('#g-unlock').onclick = async () => {
   const btn = $('#g-unlock'), pass = $('#g-pass').value;
-  if (pass.length < 8){ toast('Use at least 8 characters.'); return; }
-  btn.disabled = true; btn.textContent = 'Deriving key…';
+  if (pass.length < 8){ toast('Eight characters at the very least, sir.'); return; }
+  btn.disabled = true; btn.textContent = 'A moment, sir…';
   try {
     const isNew = await openVault(pass);
     $('#g-pass').value = '';
@@ -1240,13 +1595,15 @@ $('#g-unlock').onclick = async () => {
     $('#gate').hidden = true;
     $('#app').hidden = false;
     await loadAll();
+    await mem.load();
     renderAll();
     show('brief');
     loadContext();
+    setTimeout(speakBriefOnce, 3500);   // fallback if the forecast is slow
     if ('Notification' in window && Notification.permission === 'default')
       Notification.requestPermission().then(scheduleAlerts);
     else scheduleAlerts();
-    if (isNew) toast('Vault created. Write that passphrase down somewhere safe.');
+    if (isNew) toast('Vault created, sir. Write that passphrase down. I am entirely serious.');
   } catch (err){
     toast(err.message);
     btn.disabled = false; btn.textContent = 'Unlock';
