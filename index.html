@@ -517,10 +517,12 @@ function primeAudio(){
   if (audioPrimed) return;
   audioPrimed = true;
   /* iOS refuses speechSynthesis until it has been called once from inside
-     a real tap. One empty utterance here buys every later one. */
+     a real tap — and a volume-zero utterance does not count. This one is
+     real but inaudibly short. */
   try {
-    const u = new SpeechSynthesisUtterance(' ');
-    u.volume = 0;
+    speechSynthesis.resume();
+    const u = new SpeechSynthesisUtterance('.');
+    u.volume = 0.01; u.rate = 10;
     speechSynthesis.speak(u);
   } catch {}
   audio.src = 'data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tAwAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAADAAABgAAqKioqKioqKioqKioqKioqKlVVVVVVVVVVVVVVVVVVVVWAgICAgICAgICAgICAgICAqqqqqqqqqqqqqqqqqqqqqtXV1dXV1dXV1dXV1dXV1dX//////////////////////wAAAABMYXZjNTguMTMAAAAAAAAAAAAAAAAkAAAAAAAAAAABgJAV4H4AAAAAAAAAAAAAAAAAAAD/+0DEAAPAAAGkAAAAIAAANIAAAARMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU=';
@@ -543,14 +545,33 @@ const voice = {
 
   local(text){
     if (!('speechSynthesis' in window)) return;
+    const line = String(text).replace(/\s+/g, ' ').trim();
+    if (!line) return;
+
     speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(String(text).replace(/\s+/g, ' ').trim());
-    const v = this.list.find(x => x.name === this.chosen);
-    if (v) u.voice = v;
-    u.rate = 0.96; u.pitch = 0.92;      // a shade slower and lower: more measured
-    u.onstart = () => face.startTalk(text);
-    u.onend = u.onerror = () => face.stopTalk();
-    speechSynthesis.speak(u);
+    // Safari drops an utterance queued in the same tick as cancel(), and
+    // sometimes leaves synthesis paused after a spell in the background.
+    setTimeout(() => {
+      try {
+        speechSynthesis.resume();
+        const u = new SpeechSynthesisUtterance(line);
+        if (!this.list.length) this.load();
+        const v = this.list.find(x => x.name === this.chosen);
+        if (v) u.voice = v;
+        u.rate = 0.96; u.pitch = 0.92;   // a shade slower and lower: more measured
+        u.volume = 1;
+        u.onstart = () => face.startTalk(line);
+        u.onend = u.onerror = () => face.stopTalk();
+        speechSynthesis.speak(u);
+
+        // if nothing actually started, have one more go
+        setTimeout(() => {
+          if (!speechSynthesis.speaking && !speechSynthesis.pending){
+            try { speechSynthesis.resume(); speechSynthesis.speak(u); } catch {}
+          }
+        }, 260);
+      } catch {}
+    }, 60);
   },
 
   async speak(text){
@@ -2597,6 +2618,7 @@ $('#a-voice').onclick = () => {
       'the phone and never sent anywhere.</p>' +
     '<div style="height:.8rem"></div>' +
     '<button class="btn ghost" id="f-try">Let me hear it</button>' +
+    '<p class="small muted" id="f-diag"></p>' +
     '<div style="height:1.4rem"></div>' +
     '<div class="group">The vault</div>' +
     (locked()
@@ -2676,9 +2698,18 @@ $('#a-voice').onclick = () => {
     } catch (e){ toast(e.message || 'Face ID would not play along, sir.'); }
   };
 
-  $('#f-try').onclick = () => voice.speak(
+  const diag = () => {
+    const ok = 'speechSynthesis' in window;
+    $('#f-diag').textContent = !ok ? 'This browser has no speech at all.'
+      : voice.list.length + ' voices found. Using: ' + (voice.chosen || 'the default')
+        + '. ' + (speechSynthesis.speaking ? 'Speaking now.' : 'Idle.')
+        + ' If you hear nothing, check the silent switch on the side of the phone.';
+  };
+  diag();
+
+  $('#f-try').onclick = () => { setTimeout(diag, 700); voice.speak(
     'Good evening, sir. Two things want your attention, and one of them you have ' +
-    'been ignoring since Tuesday.');
+    'been ignoring since Tuesday.'); };
 };
 
 /* ---------------------------------------------------------------- gate */
