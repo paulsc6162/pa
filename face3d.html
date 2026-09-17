@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PA face</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#05060a;overflow:hidden;
+  font:400 15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#e8e9ec}
+#stage{position:fixed;inset:0}
+#stage canvas{display:block;width:100%;height:100%}
+#panel{position:fixed;left:0;right:0;bottom:0;z-index:5;
+  padding:.7rem .7rem calc(.9rem + env(safe-area-inset-bottom));
+  background:linear-gradient(to top,rgba(5,6,10,.95),rgba(5,6,10,0));
+  display:flex;flex-wrap:wrap;gap:.4rem;justify-content:center}
+button{font:inherit;color:#e8e9ec;background:rgba(20,24,34,.85);
+  border:1px solid #2c3446;border-radius:9px;padding:.5rem .8rem}
+button[aria-pressed="true"]{border-color:#c8a25c;color:#c8a25c}
+#say{border-color:#c8a25c;color:#20180a;background:#c8a25c;font-weight:600;flex-basis:100%}
+#cap{position:fixed;left:1rem;right:1rem;bottom:7.4rem;text-align:center;
+  text-shadow:0 2px 14px #000;font-size:.95rem;min-height:2.6em;z-index:4}
+#boot{position:fixed;left:1.2rem;right:1.2rem;top:38%;text-align:center;
+  color:#8a93a6;font-size:.9rem;z-index:6;white-space:pre-wrap;line-height:1.5}
+#boot[hidden]{display:none}
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="cap"></div>
+<div id="boot">Loading…</div>
+<div id="panel">
+  <button id="say">Say something</button>
+  <button data-m="dry" aria-pressed="true">dry</button>
+  <button data-m="amused">amused</button>
+  <button data-m="concerned">concerned</button>
+  <button data-m="flat">flat</button>
+  <button data-m="pleased">pleased</button>
+  <button data-m="sharp">sharp</button>
+</div>
+
+<script>
+/* Anything that goes wrong says so on screen rather than leaving a black
+   rectangle. Silent failure has cost us enough time on this already. */
+var boot = document.getElementById('boot');
+function fail(msg){ boot.hidden = false; boot.textContent = msg; }
+window.addEventListener('error', function(e){
+  fail('Error: ' + (e.message || e.type) + (e.filename ? '\n' + e.filename : ''));
+});
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/libs/meshopt_decoder.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+
+<script>
+var $ = function(s){ return document.querySelector(s); };
+
+var MOODS = {
+  dry:      {brow:-0.12, smile: 0.04, colour:0xb9c2cf, rough:0.16},
+  amused:   {brow: 0.28, smile: 0.34, colour:0xc2c4bd, rough:0.15},
+  concerned:{brow: 0.62, smile:-0.26, colour:0xc0a9a4, rough:0.24},
+  flat:     {brow: 0.00, smile: 0.00, colour:0xa8adb6, rough:0.30},
+  pleased:  {brow: 0.20, smile: 0.46, colour:0xb4c2b8, rough:0.17},
+  sharp:    {brow:-0.42, smile:-0.10, colour:0xc6bda4, rough:0.12}
+};
+
+var S = {mood:'dry', talking:false, env:null, mouth:0, aim:0, blink:0, nextBlink:0,
+         brow:0, browAim:-0.12, smile:0, smileAim:0.04, dict:null, inf:null,
+         mat:null, root:null};
+
+/* Chrome is almost entirely reflection, so this painted studio — an
+   overhead panel, two strip lights, a dark floor — does most of the work. */
+function studioEnv(){
+  var c = document.createElement('canvas');
+  c.width = 1024; c.height = 512;
+  var x = c.getContext('2d');
+  var g = x.createLinearGradient(0, 0, 0, 512);
+  g.addColorStop(0.00, '#cdd6e4'); g.addColorStop(0.42, '#7d8798');
+  g.addColorStop(0.50, '#2a2f3a'); g.addColorStop(0.52, '#161a22');
+  g.addColorStop(1.00, '#05070b');
+  x.fillStyle = g; x.fillRect(0, 0, 1024, 512);
+  x.fillStyle = '#ffffff';
+  x.globalAlpha = 0.95; x.fillRect(180, 16, 300, 96);
+  x.globalAlpha = 0.55; x.fillRect(640, 40, 150, 60);
+  x.globalAlpha = 0.30; x.fillRect(0, 150, 1024, 10);
+  x.globalAlpha = 0.22;
+  x.fillStyle = '#9fd8ff'; x.fillRect(820, 120, 60, 200);
+  x.fillStyle = '#ffd9a0'; x.fillRect(90, 130, 44, 180);
+  x.globalAlpha = 1;
+  var t = new THREE.CanvasTexture(c);
+  t.mapping = THREE.EquirectangularReflectionMapping;
+  t.encoding = THREE.sRGBEncoding;
+  return t;
+}
+
+function start(){
+  var renderer;
+  try { renderer = new THREE.WebGLRenderer({antialias:true}); }
+  catch (e){ return fail('WebGL will not start in this browser.'); }
+
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.05;
+  $('#stage').appendChild(renderer.domElement);
+
+  var scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x05060a);
+  scene.environment = studioEnv();
+  var camera = new THREE.PerspectiveCamera(26, 1, 0.01, 100);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.22));
+  var key = new THREE.DirectionalLight(0xffffff, 1.5);   key.position.set(-1.4, 1.8, 1.6);
+  var fillL = new THREE.DirectionalLight(0xbcd4ff, 0.55); fillL.position.set(2.2, 0.2, 1.1);
+  var rim = new THREE.DirectionalLight(0xffd9a8, 0.75);   rim.position.set(0.4, 0.9, -2.0);
+  scene.add(key, fillL, rim);
+
+  function resize(){
+    renderer.setSize(innerWidth, innerHeight, false);
+    camera.aspect = innerWidth/innerHeight;
+    camera.updateProjectionMatrix();
+  }
+  addEventListener('resize', resize); resize();
+
+  var loader = new THREE.GLTFLoader();
+  loader.setMeshoptDecoder(MeshoptDecoder);
+
+  loader.load('facecap.glb', function(gltf){
+    var root = gltf.scene; S.root = root; scene.add(root);
+
+    var chrome = new THREE.MeshStandardMaterial({
+      color: 0xb9c2cf, metalness: 1.0, roughness: 0.16, envMapIntensity: 1.35
+    });
+    S.mat = chrome;
+
+    root.traverse(function(o){
+      if (!o.isMesh) return;
+      o.material = (o.name === 'eyeLeft' || o.name === 'eyeRight')
+        ? new THREE.MeshStandardMaterial({color:0x0d1016, metalness:0.9, roughness:0.08})
+        : chrome;
+      if (o.morphTargetDictionary){
+        S.dict = o.morphTargetDictionary; S.inf = o.morphTargetInfluences;
+      }
+    });
+
+    var box = new THREE.Box3().setFromObject(root);
+    var size = box.getSize(new THREE.Vector3());
+    root.position.sub(box.getCenter(new THREE.Vector3()));
+    var d = (size.y * 1.05) / (2 * Math.tan(camera.fov * Math.PI / 360));
+    camera.position.set(0, size.y * 0.04, d * 1.02);
+    camera.lookAt(0, 0, 0);
+
+    boot.hidden = true;
+    tick();
+  }, undefined, function(err){
+    fail('The model would not load.\nIs facecap.glb sitting next to this page?\n'
+       + (err && err.message ? err.message : ''));
+  });
+
+  function set(n, v){ if (S.dict && n in S.dict) S.inf[S.dict[n]] = v; }
+  var t0 = performance.now();
+
+  function tick(){
+    requestAnimationFrame(tick);
+    var now = performance.now(), t = (now - t0)/1000;
+
+    if (S.talking && S.env){
+      var i = (now - S.env.t0)/S.env.per;
+      if (i > S.env.beats + 1){ S.talking = false; S.aim = 0; }
+      else S.aim = Math.sin((i % 1)*Math.PI)*(0.5 + 0.5*Math.abs(Math.sin(i*2.7)));
+    } else S.aim = 0;
+
+    S.mouth += (S.aim - S.mouth)*0.40;
+    S.brow  += (S.browAim - S.brow)*0.07;
+    S.smile += (S.smileAim - S.smile)*0.07;
+    if (now > S.nextBlink){ S.blink = 1; S.nextBlink = now + 2400 + Math.random()*4200; }
+    S.blink = Math.max(0, S.blink - 0.16);
+
+    var m = S.mouth;
+    set('jawOpen', m*0.75);
+    set('mouthFunnel', m*0.22*(0.5 + 0.5*Math.sin(t*7.3)));
+    set('mouthPucker', m*0.14*(0.5 + 0.5*Math.sin(t*4.1)));
+    set('mouthLowerDown_L', m*0.30); set('mouthLowerDown_R', m*0.30);
+    set('mouthUpperUp_L', m*0.18);   set('mouthUpperUp_R', m*0.18);
+    set('eyeBlink_L', S.blink);      set('eyeBlink_R', S.blink);
+    set('browInnerUp', Math.max(0, S.brow));
+    set('browOuterUp_L', Math.max(0, S.brow)*0.6);
+    set('browOuterUp_R', Math.max(0, S.brow)*0.6);
+    set('browDown_L', Math.max(0, -S.brow)); set('browDown_R', Math.max(0, -S.brow));
+    set('mouthSmile_L', Math.max(0, S.smile)); set('mouthSmile_R', Math.max(0, S.smile));
+    set('mouthFrown_L', Math.max(0, -S.smile)); set('mouthFrown_R', Math.max(0, -S.smile));
+
+    var gx = Math.sin(t*0.37)*0.5 + Math.sin(t*0.11)*0.3;
+    var gy = Math.sin(t*0.29 + 2)*0.3;
+    set('eyeLookOut_L', Math.max(0, gx)); set('eyeLookIn_R', Math.max(0, gx));
+    set('eyeLookIn_L', Math.max(0, -gx)); set('eyeLookOut_R', Math.max(0, -gx));
+    set('eyeLookUp_L', Math.max(0, gy)*0.5); set('eyeLookUp_R', Math.max(0, gy)*0.5);
+    set('eyeLookDown_L', Math.max(0, -gy)*0.5); set('eyeLookDown_R', Math.max(0, -gy)*0.5);
+
+    if (S.root){
+      S.root.rotation.y = Math.sin(t*0.23)*0.16 + Math.sin(t*0.52)*0.04;
+      S.root.rotation.x = Math.sin(t*0.31 + 1)*0.05;
+      S.root.rotation.z = Math.sin(t*0.19 + 2)*0.025;
+    }
+    renderer.render(scene, camera);
+  }
+
+  var LINES = {
+    dry: "The forecast is fourteen degrees and raining, sir. I would take the coat you claim not to need.",
+    amused: "Your three o'clock has moved again. That is the third time. I am beginning to admire his commitment.",
+    concerned: "The premises licence expires in nine days, sir, and you have not touched it. I would not leave it any longer.",
+    flat: "Nothing booked today. Overcast, sixteen degrees, no rain expected.",
+    pleased: "The VAT return went off this morning. Four days early, which for you is practically punctual.",
+    sharp: "That supplier has raised prices twice this quarter, sir. I would be asking questions rather than paying."
+  };
+  function say(){
+    var line = LINES[S.mood];
+    $('#cap').textContent = line;
+    S.talking = true;
+    S.env = {t0: performance.now(), beats: Math.round(line.split(/\s+/).length*1.6), per: 135};
+  }
+  $('#say').onclick = say;
+  var btns = document.querySelectorAll('[data-m]');
+  Array.prototype.forEach.call(btns, function(b){
+    b.onclick = function(){
+      Array.prototype.forEach.call(btns, function(x){ x.setAttribute('aria-pressed','false'); });
+      b.setAttribute('aria-pressed','true');
+      S.mood = b.dataset.m;
+      var M = MOODS[S.mood];
+      S.browAim = M.brow; S.smileAim = M.smile;
+      if (S.mat){ S.mat.color.setHex(M.colour); S.mat.roughness = M.rough; }
+      say();
+    };
+  });
+}
+
+if (typeof THREE === 'undefined') fail('three.js did not load.\nThe CDN may be blocked.');
+else if (typeof THREE.GLTFLoader === 'undefined') fail('GLTFLoader did not load.');
+else if (typeof MeshoptDecoder === 'undefined') fail('The meshopt decoder did not load.');
+else start();
+</script>
+</body>
+</html>
