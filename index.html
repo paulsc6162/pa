@@ -302,6 +302,7 @@ const CFG = {
   askEndpoint: '/.netlify/functions/ask',     // persona + web search
   speakEndpoint: '/.netlify/functions/speak', // ElevenLabs, falls back on-device
   rememberEndpoint: '/.netlify/functions/remember', // what it learns about you
+  weatherEndpoint: '/.netlify/functions/weather',   // Met Office, falling back
   kdfIters: 600000
 };
 
@@ -661,9 +662,16 @@ async function loadAll(){
 }
 
 /* -------------------------------------------------- weather & holidays */
-async function loadContext(){
+let wxAt = 0, wxDay = '';
+
+async function loadContext(force){
+  // a forecast is stale after 30 minutes, and always stale on a new day
+  const fresh = !force && Date.now() - wxAt < 1800000 && wxDay === todayISO();
+  if (fresh) return;
+
   try {
-    const hol = await fetch('https://www.gov.uk/bank-holidays.json').then(r => r.json());
+    const hol = await fetch('https://www.gov.uk/bank-holidays.json',
+      {cache: 'no-store'}).then(r => r.json());
     const t = todayISO();
     const list = hol['england-and-wales'].events;
     S.holiday = list.find(e => e.date === t) || null;
@@ -672,22 +680,29 @@ async function loadContext(){
 
   if (!navigator.geolocation) return;
   navigator.geolocation.getCurrentPosition(async pos => {
-    const la = pos.coords.latitude.toFixed(3), lo = pos.coords.longitude.toFixed(3);
+    const la = pos.coords.latitude.toFixed(4), lo = pos.coords.longitude.toFixed(4);
     try {
-      const u = 'https://api.open-meteo.com/v1/forecast?latitude=' + la + '&longitude=' + lo +
-        '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max' +
-        '&forecast_days=6&timezone=auto';
-      S.weather = await fetch(u).then(r => r.json());
+      const u = CFG.weatherEndpoint + '?lat=' + la + '&lon=' + lo + '&_=' + Date.now();
+      S.weather = await fetch(u, {cache: 'no-store'}).then(r => r.json());
+      wxAt = Date.now(); wxDay = todayISO();
       renderBrief();
       speakBriefOnce();
     } catch {}
-  }, () => {}, {maximumAge: 1800000, timeout: 8000});
+  }, () => {}, {enableHighAccuracy: false, maximumAge: 600000, timeout: 10000});
 }
 
 let spokenBrief = false;
 function speakBriefOnce(){
   if (spokenBrief) return;
   spokenBrief = true;
+  // the full brief is a once-a-day thing; after that a short greeting
+  const heardToday = localStorage.getItem('pa.briefed') === todayISO();
+  if (heardToday){
+    const h = new Date().getHours();
+    return voice.speak(h < 12 ? 'Morning again, sir.'
+                     : h < 18 ? 'Sir.' : 'Evening, sir.');
+  }
+  localStorage.setItem('pa.briefed', todayISO());
   const line = briefSentence(5);
   voice.speak(line);
   // iOS sometimes refuses the first utterance of a session outright. If
@@ -713,20 +728,16 @@ function tapToHear(line){
   };
 }
 
-const WX = {0:'clear',1:'mostly clear',2:'some cloud',3:'overcast',45:'fog',48:'freezing fog',
-  51:'light drizzle',53:'drizzle',55:'heavy drizzle',61:'light rain',63:'rain',65:'heavy rain',
-  71:'light snow',73:'snow',75:'heavy snow',80:'showers',81:'showers',82:'heavy showers',
-  95:'thunderstorms',96:'thunderstorms',99:'thunderstorms'};
-
+/* The forecast arrives already normalised, whichever service supplied it. */
 function weatherLine(i){
   i = i || 0;
   const d = S.weather && S.weather.daily;
-  if (!d) return null;
+  if (!d || !d.text || d.text[i] === undefined) return null;
   return {
-    text: WX[d.weather_code[i]] || 'mixed',
-    hi: Math.round(d.temperature_2m_max[i]),
-    lo: Math.round(d.temperature_2m_min[i]),
-    rain: d.precipitation_probability_max[i]
+    text: d.text[i],
+    hi: d.hi[i], lo: d.lo[i],
+    rain: d.rain[i], wind: d.wind[i],
+    source: S.weather.source
   };
 }
 
@@ -800,7 +811,9 @@ function renderBrief(){
   const w = weatherLine(0);
   $('#b-weather').innerHTML = w
     ? '<span><b>' + w.hi + '\u00b0</b> / ' + w.lo + '\u00b0 &nbsp;' + esc(w.text) +
-      (w.rain >= 30 ? ' \u00b7 ' + w.rain + '% rain' : '') + '</span>'
+      (w.rain >= 30 ? ' \u00b7 ' + w.rain + '% rain' : '') +
+      (w.source ? ' <span class="small muted">\u00b7 ' + esc(w.source) + '</span>' : '') +
+      '</span>'
     : '<span class="muted">No forecast \u2014 location is off.</span>';
 
   const flag = $('#b-flag');
@@ -1076,7 +1089,9 @@ function sheetAddEvent(prefill){
   $('#f-save').onclick = async () => {
     const title = $('#f-title').value.trim();
     if (!title){ toast('A title, sir, if you would.'); return; }
+    if (locked()){ toast('The vault shut while you were typing, sir.'); return; }
     const alert = $('#f-alert').value;
+    try {
     await db.insert('pa_events', {
       kind: $('#f-kind').value,
       owner_tag: $('#f-owner').value,
@@ -1090,6 +1105,9 @@ function sheetAddEvent(prefill){
     await loadAll(); renderAll(); closeSheet();
     scheduleAlerts();
     toast('Noted, sir.');
+    } catch (err){
+      toast('That did not save, sir. ' + String(err.message || err).slice(0, 60));
+    }
   };
 }
 
@@ -1574,6 +1592,7 @@ function briefSentence(days){
 
   if (w){
     out += 'Outside it is ' + w.text + ', topping out at ' + w.hi + ' degrees';
+    if (w.wind >= 30) out += ', and blowing ' + w.wind + ' miles an hour';
     out += w.rain >= 60 ? '. I would take the coat. '
          : w.rain >= 30 ? ', with a fair chance of rain. '
          : '. ';
@@ -1706,9 +1725,7 @@ async function ask(q){
   // Adding something is a form, not a conversation.
   if (/^(add|note|remind me|put in|book)\b/.test(t)){
     if (locked()) return requireVault(() => ask(q));
-    const title = q.replace(/^(add|note|remind me to|remind me|put in|book)\s*/i, '').trim();
-    say('Very good, sir. I have it open.', 'Very good, sir.');
-    return sheetAddEvent({title: title, kind: /remind/.test(t) ? 'reminder' : 'appointment'});
+    return quickEvent(q, t);
   }
 
   return askModel(q);
@@ -1818,13 +1835,16 @@ const face = {
         this.root = root; scene.add(root);
 
         const chrome = new THREE.MeshStandardMaterial({
-          color: 0xb9c2cf, metalness: 1.0, roughness: 0.16, envMapIntensity: 1.35
+          color: 0xb9c2cf, metalness: 1.0, roughness: 0.16, envMapIntensity: 1.35,
+          // without these two, r128 silently ignores every blendshape
+          morphTargets: true, morphNormals: true
         });
         this.mat = chrome;
         root.traverse(o => {
           if (!o.isMesh) return;
           o.material = (o.name === 'eyeLeft' || o.name === 'eyeRight')
-            ? new THREE.MeshStandardMaterial({color:0x0d1016, metalness:0.9, roughness:0.08})
+            ? new THREE.MeshStandardMaterial({color:0x0d1016, metalness:0.9,
+                roughness:0.08, morphTargets:true, morphNormals:true})
             : chrome;
           if (o.morphTargetDictionary){
             this.dict = o.morphTargetDictionary; this.inf = o.morphTargetInfluences;
@@ -2494,6 +2514,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible'){
     autolock.back();
     sync.refresh(true);              // the other device may have moved on
+    loadContext();                   // refetch if stale or the day has turned
     if (wake.on) { wake.pause(); wake.resume(); }
   } else {
     autolock.left();
@@ -2709,6 +2730,104 @@ const compose = {
     }, 1400);      // let it finish speaking before the app switch
   }
 };
+
+/* ------------------------------------------------- reminders by voice */
+/* Saying it should be enough. If a time can be read out of what was said,
+   file it there and then; only open the form when it genuinely cannot. */
+const WHEN = [
+  [/\btomorrow\b/i,              () => at(1, 9)],
+  [/\btonight\b/i,               () => at(0, 19)],
+  [/\bthis evening\b/i,          () => at(0, 18)],
+  [/\bthis afternoon\b/i,        () => at(0, 14)],
+  [/\bthis morning\b/i,          () => at(0, 9)],
+  [/\bnext week\b/i,             () => at(7, 9)],
+  [/\bin (\d+) days?\b/i,        m => at(+m[1], 9)],
+  [/\bin (\d+) weeks?\b/i,       m => at(+m[1]*7, 9)],
+  [/\bin an hour\b/i,            () => at(0, new Date().getHours() + 1)],
+  [/\bin (\d+) hours?\b/i,       m => at(0, new Date().getHours() + (+m[1]))],
+  [/\b(mon|tues|wednes|thurs|fri|satur|sun)day\b/i, m => nextDay(m[1])],
+  [/\btoday\b/i,                 () => at(0, Math.max(new Date().getHours() + 1, 9))]
+];
+
+function at(daysAhead, hour){
+  const d = new Date();
+  d.setDate(d.getDate() + daysAhead);
+  d.setHours(hour, 0, 0, 0);
+  return d;
+}
+function nextDay(name){
+  const names = ['sun','mon','tues','wednes','thurs','fri','satur'];
+  const want = names.indexOf(name.toLowerCase());
+  const d = new Date();
+  let add = (want - d.getDay() + 7) % 7;
+  if (add === 0) add = 7;
+  d.setDate(d.getDate() + add);
+  d.setHours(9, 0, 0, 0);
+  return d;
+}
+
+function readWhen(text){
+  let when = null;
+  for (const [re, fn] of WHEN){
+    const m = text.match(re);
+    if (m){ when = fn(m); break; }
+  }
+  // an explicit clock time overrides the hour
+  const clock = text.match(/\bat\s+(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\b/i);
+  if (clock){
+    if (!when) when = at(0, 9);
+    let h = +clock[1];
+    const min = clock[2] ? +clock[2] : 0;
+    const ap = (clock[3] || '').toLowerCase();
+    if (ap === 'pm' && h < 12) h += 12;
+    if (ap === 'am' && h === 12) h = 0;
+    if (!ap && h <= 7) h += 12;              // "at 6" means the evening
+    when.setHours(h, min, 0, 0);
+    if (when < new Date() && !/\b(tomorrow|next|in \d)/i.test(text))
+      when.setDate(when.getDate() + 1);      // that hour has gone; mean tomorrow
+  }
+  return when;
+}
+
+async function quickEvent(raw, lower){
+  const kind = /remind/i.test(lower) ? 'reminder'
+             : /\bbook\b/i.test(lower) ? 'appointment' : 'note';
+  let title = raw
+    .replace(/^(add|note|remind me to|remind me|put in|book)\s*/i, '')
+    .replace(/\b(tomorrow|tonight|this evening|this afternoon|this morning|next week|today)\b/gi, '')
+    .replace(/\bin \d+ (days?|weeks?|hours?)\b/gi, '')
+    .replace(/\bin an hour\b/gi, '')
+    .replace(/\bat\s+\d{1,2}([:.]\d{2})?\s*(am|pm)?\b/gi, '')
+    .replace(/\bon\s+(mon|tues|wednes|thurs|fri|satur|sun)day\b/gi, '')
+    .replace(/\b(mon|tues|wednes|thurs|fri|satur|sun)day\b/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/[\s,]+$/, '')
+    .trim();
+
+  const when = readWhen(raw);
+  if (!title || !when){
+    say('Very good, sir. I have it open.', 'Very good, sir.');
+    return sheetAddEvent({title: title, kind: kind});
+  }
+
+  try {
+    await db.insert('pa_events', {
+      kind: kind, owner_tag: 'personal',
+      starts_at: when.toISOString(),
+      all_day: false, important: true, recurs: 'none',
+      alerts: [{minutes_before: 60}],
+      payload_enc: await encJSON({title: title, notes: ''})
+    });
+    await loadAll(); renderAll(); scheduleAlerts();
+    const line = 'Noted, sir. ' + title.charAt(0).toUpperCase() + title.slice(1) +
+      ', ' + prettyWhen(when.toISOString(), false) + '.';
+    say(esc(line), line);
+  } catch (e){
+    say('That would not save, sir. I have opened the form instead.',
+        'That would not save, sir.');
+    sheetAddEvent({title: title, kind: kind});
+  }
+}
 
 /* ------------------------------------------------------------- alerts */
 let alertTimers = [];
