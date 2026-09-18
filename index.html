@@ -573,7 +573,11 @@ const voice = {
         if (v) u.voice = v;
         u.rate = 0.96; u.pitch = 0.92;   // a shade slower and lower: more measured
         u.volume = 1;
-        u.onstart = () => { voice.unlocked = true; hideTapToHear(); face.startTalk(line); };
+        u.onstart = () => {
+          voice.unlocked = true; hideTapToHear();
+          face.startTalk(line, u.rate);
+        };
+        u.onboundary = e => face.resync(e.charIndex, line);
         u.onend = u.onerror = () => face.stopTalk();
         speechSynthesis.speak(u);
 
@@ -604,7 +608,7 @@ const voice = {
       speechSynthesis.cancel();
       face.attach(audio);
       audio.src = url;
-      audio.onplay  = () => face.startTalk(line);
+      audio.onplay  = () => face.startTalk(line, 1);
       audio.onended = () => { face.stopTalk(); URL.revokeObjectURL(url); };
       await audio.play();
     } catch {
@@ -1731,6 +1735,90 @@ async function ask(q){
   return askModel(q);
 }
 
+/* ------------------------------------------------------------ visemes */
+/* The on-device voice gives us no audio to measure, so the mouth is
+   driven from the text instead: work out which sound is roughly being
+   spoken at each moment and set the shape for it. Not true lip sync —
+   nothing free is — but it forms recognisable shapes instead of flapping.
+
+   Each viseme is {jaw, funnel, pucker, wide, ms}. */
+const VIS = {
+  a:{j:0.80,f:0.00,p:0.00,w:0.30,ms:125},
+  e:{j:0.45,f:0.00,p:0.00,w:0.60,ms:115},
+  i:{j:0.25,f:0.00,p:0.00,w:0.75,ms:105},
+  o:{j:0.55,f:0.35,p:0.60,w:0.00,ms:125},
+  u:{j:0.30,f:0.45,p:0.85,w:0.00,ms:120},
+  m:{j:0.02,f:0.00,p:0.15,w:0.00,ms:85},     // lips together
+  f:{j:0.14,f:0.25,p:0.00,w:0.35,ms:80},     // teeth on lip
+  s:{j:0.16,f:0.00,p:0.00,w:0.55,ms:85},
+  t:{j:0.28,f:0.00,p:0.00,w:0.30,ms:70},
+  k:{j:0.38,f:0.00,p:0.00,w:0.20,ms:75},
+  r:{j:0.32,f:0.20,p:0.35,w:0.00,ms:85},
+  l:{j:0.34,f:0.00,p:0.00,w:0.25,ms:80},
+  sh:{j:0.30,f:0.40,p:0.55,w:0.00,ms:95},
+  th:{j:0.20,f:0.10,p:0.00,w:0.40,ms:80},
+  _:{j:0.00,f:0.00,p:0.00,w:0.00,ms:95},     // gap between words
+  '.':{j:0.00,f:0.00,p:0.00,w:0.00,ms:260}   // end of a clause
+};
+
+/* Crude but effective: English spelling maps to mouth shape far better
+   than it maps to sound. Digraphs first, then single letters. */
+/* The estimate above is generic; a given voice at a given rate is not.
+   After each utterance we compare predicted length against actual and
+   nudge a calibration factor, so sync improves with use. */
+let paceFactor = parseFloat(localStorage.getItem('pa.pace') || '1') || 1;
+
+function calibratePace(predictedMs, actualMs){
+  if (!predictedMs || !actualMs || actualMs < 700) return;
+  const ratio = actualMs / predictedMs;
+  if (ratio < 0.4 || ratio > 2.5) return;          // nonsense, ignore
+  paceFactor = paceFactor * 0.8 + (paceFactor * ratio) * 0.2;
+  paceFactor = Math.min(2, Math.max(0.5, paceFactor));
+  localStorage.setItem('pa.pace', paceFactor.toFixed(3));
+}
+
+function visemes(text, rate){
+  const t = text.toLowerCase();
+  const out = [];
+  const push = k => { const v = VIS[k]; if (v) out.push(v); };
+
+  for (let i = 0; i < t.length; i++){
+    const two = t.slice(i, i + 2);
+    if (two === 'sh' || two === 'ch' || two === 'zh' || two === 'ju'){ push('sh'); i++; continue; }
+    if (two === 'th'){ push('th'); i++; continue; }
+    if (two === 'ph'){ push('f'); i++; continue; }
+    if (two === 'ck' || two === 'qu'){ push('k'); i++; continue; }
+    if (two === 'oo' || two === 'ou' || two === 'ow'){ push('u'); i++; continue; }
+    if (two === 'ee' || two === 'ea'){ push('i'); i++; continue; }
+    if (two === 'ai' || two === 'ay'){ push('e'); i++; continue; }
+
+    const c = t[i];
+    if ('aà'.includes(c)) push('a');
+    else if ('eé'.includes(c)) push('e');
+    else if ('iy'.includes(c)) push('i');
+    else if (c === 'o') push('o');
+    else if ('uw'.includes(c)) push('u');
+    else if ('mbp'.includes(c)) push('m');
+    else if ('fv'.includes(c)) push('f');
+    else if ('szxc'.includes(c)) push('s');
+    else if ('tdnjg'.includes(c)) push('t');
+    else if ('kqh'.includes(c)) push('k');
+    else if (c === 'r') push('r');
+    else if (c === 'l') push('l');
+    else if (c === ' ') push('_');
+    else if ('.,;:!?'.includes(c)) push('.');
+  }
+
+  // build a timeline, matched to the speaking rate and the learned pace
+  const scale = paceFactor / (rate || 1);
+  let at = 0;
+  return out.map(v => {
+    const frame = {t: at, j: v.j, f: v.f, p: v.p, w: v.w};
+    at += v.ms * scale;
+    return frame;
+  });
+}
+
 /* --------------------------------------------------------------- face */
 /* A scanned head with a full ARKit blendshape rig, rendered in WebGL as
    polished metal. Jaw, lips, eyelids and brows are real morph targets, so
@@ -1740,8 +1828,10 @@ async function ask(q){
 const face = {
   ready:false, loading:false, broken:false, open:false, raf:null, t0:0,
   mouth:0, aim:0, blink:0, nextBlink:0,
+  jaw:0, funnel:0, pucker:0, wide:0,          // current mouth shape
   brow:0, browAim:-0.12, smile:0, smileAim:0.04,
   mood:'dry', talking:false, env:null, headSize:0,
+  line:null, lineT0:0, lineRate:0.96,
   dict:null, inf:null, mat:null, root:null,
   renderer:null, scene:null, camera:null,
   auto: localStorage.getItem('pa.face') !== 'off',
@@ -1917,13 +2007,48 @@ const face = {
     if (this.mat){ this.mat.color.setHex(M.colour); this.mat.roughness = M.rough; }
   },
 
-  startTalk(text){
+  startTalk(text, rate){
     this.talking = true;
+    this.spokeAt = performance.now();
     if (this.auto && !this.open) this.show();
+    this.lineRate = rate || 0.96;
+    this.line = visemes(String(text || ''), this.lineRate);
+    this.lineT0 = performance.now();
     const words = Math.max(1, (text || '').trim().split(/\s+/).length);
     this.env = {t0: performance.now(), beats: Math.round(words*1.6), per: 135};
   },
-  stopTalk(){ this.talking = false; this.env = null; this.aim = 0; },
+
+  /* If the browser tells us which word it has reached, use it to pull the
+     timeline back into step. Safari often stays silent here. */
+  resync(charIndex, text){
+    if (!this.line || !text) return;
+    const ahead = visemes(String(text).slice(0, charIndex), this.lineRate);
+    if (!ahead.length) return;
+    this.lineT0 = performance.now() - ahead[ahead.length - 1].t;
+  },
+
+  stopTalk(){
+    if (this.spokeAt && this.line && this.line.length){
+      calibratePace(this.line[this.line.length - 1].t,
+                    performance.now() - this.spokeAt);
+    }
+    this.spokeAt = 0;
+    this.talking = false; this.env = null; this.aim = 0; this.line = null;
+  },
+
+  /* Where in the line we are, and what the mouth should be doing there. */
+  shape(){
+    if (!this.talking || !this.line || !this.line.length) return null;
+    const ms = performance.now() - this.lineT0;
+    const L = this.line;
+    if (ms > L[L.length - 1].t + 400) return null;
+    let lo = 0, hi = L.length - 1;
+    while (lo < hi){
+      const mid = (lo + hi + 1) >> 1;
+      if (L[mid].t <= ms) lo = mid; else hi = mid - 1;
+    }
+    return L[lo];
+  },
 
   /* With the ElevenLabs voice the audio is measurable, so the mouth can
      follow the actual sound instead of an envelope. */
@@ -1956,19 +2081,32 @@ const face = {
     const now = performance.now(), t = (now - this.t0)/1000;
     const set = (n, v) => { if (this.dict && n in this.dict) this.inf[this.dict[n]] = v; };
 
-    this.aim = this.level();
-    this.mouth += (this.aim - this.mouth)*0.40;
+    const sh = this.shape();
+    // with the better voice the audio gives us loudness; the text gives
+    // us the shape. Together they read far better than either alone.
+    const loud = this.an ? this.level() : 1;
+    const tgt = sh ? {j: sh.j*loud, f: sh.f*loud, p: sh.p*loud, w: sh.w*loud}
+                   : {j:0, f:0, p:0, w:0};
+    const k = 0.34;
+    this.jaw    += (tgt.j - this.jaw)*k;
+    this.funnel += (tgt.f - this.funnel)*k;
+    this.pucker += (tgt.p - this.pucker)*k;
+    this.wide   += (tgt.w - this.wide)*k;
+    this.mouth = this.jaw;
     this.brow  += (this.browAim - this.brow)*0.07;
     this.smile += (this.smileAim - this.smile)*0.07;
     if (now > this.nextBlink){ this.blink = 1; this.nextBlink = now + 2400 + Math.random()*4200; }
     this.blink = Math.max(0, this.blink - 0.16);
 
-    const m = this.mouth;
-    set('jawOpen', m*0.75);
-    set('mouthFunnel', m*0.22*(0.5 + 0.5*Math.sin(t*7.3)));
-    set('mouthPucker', m*0.14*(0.5 + 0.5*Math.sin(t*4.1)));
-    set('mouthLowerDown_L', m*0.30); set('mouthLowerDown_R', m*0.30);
-    set('mouthUpperUp_L', m*0.18);   set('mouthUpperUp_R', m*0.18);
+    set('jawOpen', this.jaw*0.80);
+    set('mouthFunnel', this.funnel);
+    set('mouthPucker', this.pucker);
+    set('mouthStretch_L', this.wide*0.55); set('mouthStretch_R', this.wide*0.55);
+    set('mouthLowerDown_L', this.jaw*0.26); set('mouthLowerDown_R', this.jaw*0.26);
+    set('mouthUpperUp_L', this.jaw*0.16 + this.wide*0.20);
+    set('mouthUpperUp_R', this.jaw*0.16 + this.wide*0.20);
+    set('mouthClose', this.jaw < 0.05 && this.talking ? 0.35 : 0);
+    set('jawForward', this.pucker*0.18);
     set('eyeBlink_L', this.blink);   set('eyeBlink_R', this.blink);
     set('browInnerUp', Math.max(0, this.brow));
     set('browOuterUp_L', Math.max(0, this.brow)*0.6);
