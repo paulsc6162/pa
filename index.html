@@ -2606,7 +2606,8 @@ const wake = {
       };
       this.rec.onend = () => {
         this.running = false;
-        if (this.on && !rec) setTimeout(() => this.start(), 250);
+        // restart promptly; every millisecond here is a millisecond deaf
+        if (this.on && !rec) setTimeout(() => this.start(), 80);
       };
       this.rec.start();
       this.running = true;
@@ -2626,18 +2627,26 @@ const wake = {
 
   heard(e){
     const last = e.results[e.results.length - 1];
-    if (!last.isFinal) return;
     const text = last[0].transcript.trim();
     if (!text) return;
 
+    /* The wake word is matched on interim results. Waiting for a final
+       transcript costs a second or more, which is most of why it felt
+       slow. Commands still wait for the final, where accuracy matters. */
     if (!this.awake){
       const lower = text.toLowerCase();
       const i = lower.indexOf(this.word);
       if (i === -1) return;                 // discarded here, never sent anywhere
+      const now = Date.now();
+      if (now - (this.lastRouse || 0) < 1500) return;   // one wake per phrase
+      this.lastRouse = now;
       const after = text.slice(i + this.word.length).replace(/^[\s,.:;-]+/, '');
-      this.rouse(after);
+      // if the rest is still being spoken, wait for the final before acting
+      this.rouse(last.isFinal ? after : '');
       return;
     }
+
+    if (!last.isFinal) return;
 
     clearTimeout(this.sleepTimer);
     this.sleepTimer = setTimeout(() => this.doze(), 25000);
@@ -2654,7 +2663,8 @@ const wake = {
       if (compose.looksLikeMessage(rest)) return compose.begin(rest);
       return ask(rest);
     }
-    voice.speak(pick(['Sir?', 'Yes, sir.', 'At your service.', 'Listening, sir.']));
+    // a short answer so you know it is listening, before you start talking
+    voice.speak(pick(['Sir?', 'Yes, sir.', 'Sir.', 'Listening.']));
   },
 
   doze(){
@@ -3273,11 +3283,6 @@ async function toUnlock(){
   if ('Notification' in window && Notification.permission === 'default')
     Notification.requestPermission();
   if (wake.on) setTimeout(() => wake.start(), 1200);
-  setTimeout(() => {
-    const h = new Date().getHours();
-    voice.speak((h < 12 ? 'Good morning, sir.' : h < 18 ? 'Good afternoon, sir.' : 'Good evening, sir.') +
-      ' The vault is shut. Ask when you want it open.');
-  }, 600);
 }
 
 
